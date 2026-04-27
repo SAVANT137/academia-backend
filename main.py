@@ -1477,18 +1477,42 @@ def confirmar_liberacao_catraca_core(pedido_id: int, sucesso: bool, erro: str, t
         if pedido.status == "executado":
             return {"ok": True, "pedido_id": pedido.id, "status": pedido.status}
 
+        # Primeiro confirma o pedido. Isso não pode falhar só porque o histórico de entrada deu problema.
         pedido.status = "executado" if sucesso else "erro"
         pedido.erro = (erro or None)
         pedido.executado_em = datetime.utcnow() if sucesso else None
         pedido.atualizado_em = datetime.utcnow()
-
-        if sucesso:
-            aluno = buscar_aluno_por_id(db, pedido.aluno_id)
-            if aluno:
-                registrar_evento_entrada(db, aluno, "liberado", "catraca")
-
         db.commit()
-        return {"ok": True, "pedido_id": pedido.id, "status": pedido.status}
+        db.refresh(pedido)
+
+        entrada_registrada = False
+        entrada_erro = None
+
+        # Depois tenta registrar o histórico. Se falhar, não derruba a confirmação da catraca.
+        if sucesso:
+            try:
+                aluno = buscar_aluno_por_id(db, pedido.aluno_id)
+                if aluno:
+                    registrar_evento_entrada(db, aluno, "liberado", "catraca")
+                    db.commit()
+                    entrada_registrada = True
+            except Exception as e:
+                db.rollback()
+                entrada_erro = str(e)[:180]
+
+        return {
+            "ok": True,
+            "pedido_id": pedido.id,
+            "status": pedido.status,
+            "entrada_registrada": entrada_registrada,
+            "entrada_erro": entrada_erro,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao confirmar pedido da catraca: {e}")
     finally:
         db.close()
 
