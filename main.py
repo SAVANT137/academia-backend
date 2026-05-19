@@ -179,9 +179,20 @@ class LiberacaoCatracaDB(Base):
 
 
 def ensure_schema_updates():
+    """
+    Mantém o banco compatível com o app mesmo quando o PostgreSQL é recriado vazio
+    ou quando a importação cria apenas a tabela alunos. Isso evita erro 500 em
+    /avisos, /treinos, pagamentos e catraca por tabela ausente.
+    """
     insp = inspect(engine)
     is_postgres = str(DATABASE_URL).startswith("postgres")
 
+    # 1) Garante a tabela principal primeiro, pois várias outras têm FK para alunos.
+    if "alunos" not in insp.get_table_names():
+        AlunoDB.__table__.create(bind=engine, checkfirst=True)
+        insp = inspect(engine)
+
+    # 2) Garante colunas esperadas na tabela alunos importada pelo SQL.
     if "alunos" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("alunos")}
         alter_cmds = []
@@ -200,7 +211,7 @@ def ensure_schema_updates():
             "status_cliente_raw": "ALTER TABLE alunos ADD COLUMN status_cliente_raw VARCHAR(50)",
             "status_contrato_raw": "ALTER TABLE alunos ADD COLUMN status_contrato_raw VARCHAR(50)",
             "valor_personalizado": "ALTER TABLE alunos ADD COLUMN valor_personalizado FLOAT",
-            "beneficio_ativo": "ALTER TABLE alunos ADD COLUMN beneficio_ativo BOOLEAN DEFAULT 1",
+            "beneficio_ativo": "ALTER TABLE alunos ADD COLUMN beneficio_ativo BOOLEAN DEFAULT TRUE",
             "valor_padrao_plano": "ALTER TABLE alunos ADD COLUMN valor_padrao_plano FLOAT",
             "origem_valor": "ALTER TABLE alunos ADD COLUMN origem_valor VARCHAR(50)",
             "created_at": "ALTER TABLE alunos ADD COLUMN created_at TIMESTAMP",
@@ -214,8 +225,31 @@ def ensure_schema_updates():
         if alter_cmds:
             with engine.begin() as conn:
                 for cmd in alter_cmds:
-                    conn.execute(text(cmd))
+                    try:
+                        conn.execute(text(cmd))
+                    except Exception:
+                        # Se uma coluna foi criada por outro processo entre o inspect e o ALTER,
+                        # não derruba o deploy.
+                        pass
 
+    # 3) Cria tabelas auxiliares ausentes em ordem segura.
+    # Não usamos Base.metadata.create_all em banco parcialmente migrado para evitar
+    # conflitos de índice em bancos antigos; criamos só o que estiver faltando.
+    insp = inspect(engine)
+    table_names = set(insp.get_table_names())
+    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB]:
+        if model.__tablename__ not in table_names:
+            try:
+                model.__table__.create(bind=engine, checkfirst=True)
+            except Exception:
+                # Mantém o deploy vivo mesmo que alguma tabela opcional falhe;
+                # rotas de manutenção retornam vazio/0 quando necessário.
+                pass
+            insp = inspect(engine)
+            table_names = set(insp.get_table_names())
+
+    # 4) Ajusta colunas de pagamentos, se a tabela já existia de uma versão antiga.
+    insp = inspect(engine)
     if "pagamentos" in insp.get_table_names():
         cols = {c["name"] for c in insp.get_columns("pagamentos")}
         alter_cmds = []
@@ -238,7 +272,10 @@ def ensure_schema_updates():
 
         with engine.begin() as conn:
             for cmd in alter_cmds:
-                conn.execute(text(cmd))
+                try:
+                    conn.execute(text(cmd))
+                except Exception:
+                    pass
 
             if is_postgres:
                 safe_alters = [
@@ -255,38 +292,36 @@ def ensure_schema_updates():
                     except Exception:
                         pass
 
-    # Ajustes da tabela de entradas: evita erro de varchar(16) em motivo/status/nome.
-    if "entradas" in insp.get_table_names():
+    # 5) Ajustes da tabela de entradas: evita erro de varchar curto em motivo/status/nome.
+    insp = inspect(engine)
+    if "entradas" in insp.get_table_names() and is_postgres:
         with engine.begin() as conn:
-            if is_postgres:
-                for cmd in [
-                    "ALTER TABLE public.entradas ALTER COLUMN nome TYPE TEXT",
-                    "ALTER TABLE public.entradas ALTER COLUMN status TYPE TEXT",
-                    "ALTER TABLE public.entradas ALTER COLUMN motivo TYPE TEXT",
-                ]:
-                    try:
-                        conn.execute(text(cmd))
-                    except Exception:
-                        pass
+            for cmd in [
+                "ALTER TABLE public.entradas ALTER COLUMN nome TYPE TEXT",
+                "ALTER TABLE public.entradas ALTER COLUMN status TYPE TEXT",
+                "ALTER TABLE public.entradas ALTER COLUMN motivo TYPE TEXT",
+            ]:
+                try:
+                    conn.execute(text(cmd))
+                except Exception:
+                    pass
 
-    # Cria/ajusta tabela usada pelo agente local da catraca Henry.
-    if "liberacoes_catraca" not in insp.get_table_names():
-        LiberacaoCatracaDB.__table__.create(bind=engine, checkfirst=True)
-    else:
-        if is_postgres:
-            with engine.begin() as conn:
-                for cmd in [
-                    "ALTER TABLE public.liberacoes_catraca ALTER COLUMN cpf TYPE TEXT",
-                    "ALTER TABLE public.liberacoes_catraca ALTER COLUMN nome TYPE TEXT",
-                    "ALTER TABLE public.liberacoes_catraca ALTER COLUMN status TYPE TEXT",
-                    "ALTER TABLE public.liberacoes_catraca ALTER COLUMN sentido TYPE TEXT",
-                    "ALTER TABLE public.liberacoes_catraca ALTER COLUMN motivo TYPE TEXT",
-                    "ALTER TABLE public.liberacoes_catraca ALTER COLUMN erro TYPE TEXT",
-                ]:
-                    try:
-                        conn.execute(text(cmd))
-                    except Exception:
-                        pass
+    # 6) Ajustes da tabela usada pelo agente local da catraca Henry.
+    insp = inspect(engine)
+    if "liberacoes_catraca" in insp.get_table_names() and is_postgres:
+        with engine.begin() as conn:
+            for cmd in [
+                "ALTER TABLE public.liberacoes_catraca ALTER COLUMN cpf TYPE TEXT",
+                "ALTER TABLE public.liberacoes_catraca ALTER COLUMN nome TYPE TEXT",
+                "ALTER TABLE public.liberacoes_catraca ALTER COLUMN status TYPE TEXT",
+                "ALTER TABLE public.liberacoes_catraca ALTER COLUMN sentido TYPE TEXT",
+                "ALTER TABLE public.liberacoes_catraca ALTER COLUMN motivo TYPE TEXT",
+                "ALTER TABLE public.liberacoes_catraca ALTER COLUMN erro TYPE TEXT",
+            ]:
+                try:
+                    conn.execute(text(cmd))
+                except Exception:
+                    pass
 
 ensure_schema_updates()
 
@@ -1134,6 +1169,8 @@ def criar_aviso(body: AvisoCreate = Body(...)):
 
 @app.get("/avisos")
 def listar_avisos():
+    # Avisos estão em manutenção nesta versão. Se a tabela não existir ou o banco
+    # estiver parcialmente migrado, retorna lista vazia para não quebrar o webapp.
     db = SessionLocal()
     try:
         avisos = db.query(AvisoDB).order_by(AvisoDB.data.desc()).all()
@@ -1143,10 +1180,13 @@ def listar_avisos():
                 "titulo": a.titulo,
                 "mensagem": a.mensagem,
                 "imagem_base64": a.imagem_base64,
-                "data": a.data.isoformat(),
+                "data": a.data.isoformat() if a.data else None,
             }
             for a in avisos
         ]
+    except Exception:
+        db.rollback()
+        return []
     finally:
         db.close()
 
@@ -1182,6 +1222,7 @@ def marcar_aviso_lido(aviso_id: int, body: AvisoLidoBody):
 
 @app.get("/alunos/{aluno_id}/avisos/nao-lidos")
 def avisos_nao_lidos(aluno_id: int):
+    # Avisos em manutenção: qualquer erro de tabela ausente vira 0 não lidos.
     db = SessionLocal()
     try:
         total = db.query(AvisoDB).count()
@@ -1191,6 +1232,9 @@ def avisos_nao_lidos(aluno_id: int):
             .count()
         )
         return {"nao_lidos": max(total - lidos, 0)}
+    except Exception:
+        db.rollback()
+        return {"nao_lidos": 0}
     finally:
         db.close()
 
@@ -1785,12 +1829,20 @@ def aluno_login(cpf: str):
         aluno = buscar_aluno_por_cpf(db, cpf)
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        nao_lidos = db.query(AvisoLidoDB).filter(AvisoLidoDB.aluno_id == aluno.id).count()
-        total_avisos = db.query(AvisoDB).count()
+
+        avisos_nao_lidos_qtd = 0
+        try:
+            nao_lidos = db.query(AvisoLeituraDB).filter(AvisoLeituraDB.aluno_id == aluno.id).count()
+            total_avisos = db.query(AvisoDB).count()
+            avisos_nao_lidos_qtd = max(total_avisos - nao_lidos, 0)
+        except Exception:
+            db.rollback()
+            avisos_nao_lidos_qtd = 0
+
         return {
             "ok": True,
             "aluno": aluno_dict(db, aluno),
-            "avisos_nao_lidos": max(total_avisos - nao_lidos, 0),
+            "avisos_nao_lidos": avisos_nao_lidos_qtd,
         }
     finally:
         db.close()
@@ -1844,29 +1896,34 @@ def excluir_aviso(aviso_id: int):
 
 @app.get("/aluno/{aluno_id}/avisos")
 def avisos_aluno(aluno_id: int):
+    # Avisos estão em manutenção; mantém compatibilidade do Flutter sem erro 500.
     db = SessionLocal()
     try:
         aluno = buscar_aluno_por_id(db, aluno_id)
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        avisos = db.query(AvisoDB).order_by(AvisoDB.data.desc()).all()
-        lidos_ids = {
-            item.aviso_id for item in db.query(AvisoLidoDB).filter(AvisoLidoDB.aluno_id == aluno_id).all()
-        }
-        return {
-            "avisos": [
-                {
-                    "id": a.id,
-                    "titulo": a.titulo,
-                    "mensagem": a.mensagem,
-                    "imagem_base64": a.imagem_base64,
-                    "data": a.data.isoformat(),
-                    "lido": a.id in lidos_ids,
-                }
-                for a in avisos
-            ],
-            "nao_lidos": sum(1 for a in avisos if a.id not in lidos_ids),
-        }
+        try:
+            avisos = db.query(AvisoDB).order_by(AvisoDB.data.desc()).all()
+            lidos_ids = {
+                item.aviso_id for item in db.query(AvisoLeituraDB).filter(AvisoLeituraDB.aluno_id == aluno_id).all()
+            }
+            return {
+                "avisos": [
+                    {
+                        "id": a.id,
+                        "titulo": a.titulo,
+                        "mensagem": a.mensagem,
+                        "imagem_base64": a.imagem_base64,
+                        "data": a.data.isoformat() if a.data else None,
+                        "lido": a.id in lidos_ids,
+                    }
+                    for a in avisos
+                ],
+                "nao_lidos": sum(1 for a in avisos if a.id not in lidos_ids),
+            }
+        except Exception:
+            db.rollback()
+            return {"avisos": [], "nao_lidos": 0}
     finally:
         db.close()
 
@@ -1874,100 +1931,20 @@ def avisos_aluno(aluno_id: int):
 def marcar_aviso_lido_compat(aluno_id: int, aviso_id: int):
     db = SessionLocal()
     try:
-        existe = (
-            db.query(AvisoLidoDB)
-            .filter(AvisoLidoDB.aluno_id == aluno_id, AvisoLidoDB.aviso_id == aviso_id)
-            .first()
-        )
-        if not existe:
-            db.add(AvisoLidoDB(aluno_id=aluno_id, aviso_id=aviso_id))
+        try:
+            existe = (
+                db.query(AvisoLeituraDB)
+                .filter(AvisoLeituraDB.aluno_id == aluno_id, AvisoLeituraDB.aviso_id == aviso_id)
+                .first()
+            )
+            if not existe:
+                db.add(AvisoLeituraDB(aluno_id=aluno_id, aviso_id=aviso_id, lido=True))
             db.commit()
+        except Exception:
+            db.rollback()
         return {"ok": True}
     finally:
         db.close()
-
-@app.get("/aluno/{aluno_id}/pagamentos")
-def pagamentos_aluno_compat(aluno_id: int):
-    return listar_pagamentos_aluno(aluno_id)
-
-@app.get("/aluno/{aluno_id}/progresso")
-def progresso_aluno_compat(aluno_id: int):
-    db = SessionLocal()
-    try:
-        aluno = buscar_aluno_por_id(db, aluno_id)
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        total = (
-            db.query(EntradaDB)
-            .filter(EntradaDB.aluno_id == aluno_id, EntradaDB.status == "liberado")
-            .count()
-        )
-        return calcular_progresso(total)
-    finally:
-        db.close()
-
-@app.put("/aluno/{aluno_id}/regularizar")
-def regularizar_aluno_compat(aluno_id: int, dias: int = Query(...), valor: float = Query(...)):
-    plano = "mensal"
-    if dias >= 365:
-        plano = "anual"
-    elif dias >= 180:
-        plano = "semestral"
-    elif dias >= 30 and valor < MENSAL_VALOR:
-        plano = "promocional"
-    elif dias >= 30:
-        plano = "mensal"
-    return registrar_pagamento(aluno_id, PagamentoBody(plano=plano, valor=valor, dias=dias, origem="manual"))
-
-@app.get("/admin/treinos")
-def listar_treinos_admin(aluno_id: Optional[int] = Query(default=None)):
-    db = SessionLocal()
-    try:
-        q = db.query(TreinoDB)
-        if aluno_id:
-            q = q.filter(TreinoDB.aluno_id == aluno_id)
-        treinos = q.order_by(TreinoDB.id.desc()).all()
-        return [
-            {
-                "id": t.id,
-                "aluno_id": t.aluno_id,
-                "categoria": t.categoria,
-                "titulo": t.titulo,
-                "descricao": t.descricao,
-                "exercicios": t.exercicios,
-                "video_url": t.video_url,
-            }
-            for t in treinos
-        ]
-    finally:
-        db.close()
-
-class TreinoCompatCreate(BaseModel):
-    aluno_id: int
-    codigo: Optional[str] = None
-    categoria: Optional[str] = None
-    titulo: str
-    descricao: Optional[str] = None
-    exercicios: Optional[list[str]] = None
-    video_url: Optional[str] = None
-    ordem: Optional[int] = None
-
-@app.post("/treinos/compat")
-def salvar_treino_compat(body: TreinoCompatCreate):
-    categoria = (body.categoria or body.codigo or "A").strip().upper()
-    if categoria not in ["A", "B", "C", "D", "E"]:
-        categoria = "A"
-    descricao = body.descricao
-    if not descricao and body.exercicios:
-        descricao = "\n".join(body.exercicios)
-    return criar_treino(TreinoCreate(
-        aluno_id=body.aluno_id,
-        categoria=categoria,
-        titulo=body.titulo,
-        descricao=descricao,
-        exercicios=descricao,
-        video_url=body.video_url,
-    ))
 
 @app.post("/pagamentos/criar")
 def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends(get_db)):
