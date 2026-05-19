@@ -491,8 +491,12 @@ def dias_atraso(vencimento: Optional[str]) -> int:
 def obter_status_por_regras(aluno: AlunoDB) -> str:
     manual = (aluno.status_manual or "").strip().lower()
 
-    # cadastro novo sem pagamento inicial
-    if manual == "pendente" or not aluno.vencimento:
+    # Para alunos importados da planilha oficial, respeita o status salvo no banco.
+    if manual in {"em_dia", "atrasado", "inativo", "pendente"}:
+        return manual
+
+    # Se não tiver status manual, usa regra automática como fallback.
+    if not aluno.vencimento:
         return "pendente"
 
     atraso = dias_atraso(aluno.vencimento)
