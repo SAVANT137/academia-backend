@@ -28,7 +28,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.0.3"
+APP_VERSION = "5.0.4"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -1871,24 +1871,65 @@ def relatorio_planos():
     finally:
         db.close()
 
+def _pagamento_admin_dict(p: PagamentoDB) -> dict:
+    aluno = getattr(p, "aluno", None)
+    return {
+        "id": p.id,
+        "aluno_id": p.aluno_id,
+        "nome": aluno.nome if aluno else None,
+        "aluno_nome": aluno.nome if aluno else None,
+        "cpf": aluno.cpf if aluno else None,
+        "telefone": aluno.telefone if aluno else None,
+        "plano_nome": p.plano_nome,
+        "valor": float(p.valor or 0),
+        "dias": int(p.dias or 0),
+        "status": p.status,
+        "origem": p.origem,
+        "order_nsu": p.order_nsu,
+        "link_pagamento": p.link_pagamento,
+        "data_pagamento": p.data_pagamento.isoformat() if p.data_pagamento else None,
+        "vencimento_anterior": p.vencimento_anterior,
+        "novo_vencimento": p.novo_vencimento,
+    }
+
+def _pagamento_recebido(p: PagamentoDB) -> bool:
+    s = (p.status or "").strip().lower()
+    return s in {"pago", "aprovado", "approved", "paid", "recebido"} or "aprov" in s or "pago" in s or "paid" in s
+
 @app.get("/relatorio/vendas")
 def relatorio_vendas(periodo: str = "mes"):
     db = SessionLocal()
     try:
         pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
-        total = sum(float(p.valor or 0) for p in pagamentos)
-        quantidade = len(pagamentos)
+        recebidos = [p for p in pagamentos if _pagamento_recebido(p)]
+        total = sum(float(p.valor or 0) for p in recebidos)
+        quantidade = len(recebidos)
+        pendentes = len([p for p in pagamentos if not _pagamento_recebido(p)])
         return {
             "periodo": periodo,
             "total": total,
             "quantidade": quantidade,
+            "pendentes": pendentes,
         }
     finally:
         db.close()
 
 @app.get("/historico")
 def historico_alias():
-    return listar_entradas()
+    db = SessionLocal()
+    try:
+        pagamentos = (
+            db.query(PagamentoDB)
+            .order_by(PagamentoDB.data_pagamento.desc(), PagamentoDB.id.desc())
+            .all()
+        )
+        return [_pagamento_admin_dict(p) for p in pagamentos]
+    finally:
+        db.close()
+
+@app.get("/pagamentos")
+def listar_pagamentos_admin():
+    return historico_alias()
 
 @app.delete("/avisos/{aviso_id}")
 def excluir_aviso(aviso_id: int):
