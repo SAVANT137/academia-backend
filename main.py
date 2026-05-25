@@ -112,6 +112,7 @@ class PagamentoDB(Base):
     status = Column(String, default="pago")
     origem = Column(String, default="manual")
     link_pagamento = Column(Text, nullable=True)
+    order_nsu = Column(String, nullable=True, index=True)
     data_pagamento = Column(DateTime, default=datetime.utcnow)
     vencimento_anterior = Column(String, nullable=True)
     novo_vencimento = Column(String, nullable=True)
@@ -261,6 +262,7 @@ def ensure_schema_updates():
             "status": "ALTER TABLE pagamentos ADD COLUMN status VARCHAR(30) DEFAULT 'pendente'",
             "origem": "ALTER TABLE pagamentos ADD COLUMN origem VARCHAR(50) DEFAULT 'manual'",
             "link_pagamento": "ALTER TABLE pagamentos ADD COLUMN link_pagamento TEXT",
+            "order_nsu": "ALTER TABLE pagamentos ADD COLUMN order_nsu VARCHAR(120)",
             "data_pagamento": "ALTER TABLE pagamentos ADD COLUMN data_pagamento TIMESTAMP",
             "vencimento_anterior": "ALTER TABLE pagamentos ADD COLUMN vencimento_anterior VARCHAR(30)",
             "novo_vencimento": "ALTER TABLE pagamentos ADD COLUMN novo_vencimento VARCHAR(30)",
@@ -283,6 +285,7 @@ def ensure_schema_updates():
                     "ALTER TABLE pagamentos ALTER COLUMN status TYPE VARCHAR(30)",
                     "ALTER TABLE pagamentos ALTER COLUMN origem TYPE VARCHAR(50)",
                     "ALTER TABLE pagamentos ALTER COLUMN link_pagamento TYPE TEXT",
+                    "ALTER TABLE pagamentos ALTER COLUMN order_nsu TYPE VARCHAR(120)",
                     "ALTER TABLE pagamentos ALTER COLUMN vencimento_anterior TYPE VARCHAR(30)",
                     "ALTER TABLE pagamentos ALTER COLUMN novo_vencimento TYPE VARCHAR(30)",
                 ]
@@ -685,6 +688,7 @@ def pagamento_dict(p: PagamentoDB) -> dict:
         "status": p.status,
         "origem": p.origem,
         "link_pagamento": p.link_pagamento,
+        "order_nsu": getattr(p, "order_nsu", None),
         "data_pagamento": p.data_pagamento.isoformat() if p.data_pagamento else None,
         "vencimento_anterior": p.vencimento_anterior,
         "novo_vencimento": p.novo_vencimento,
@@ -2011,6 +2015,7 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
             status="pendente",
             origem="infinitepay",
             link_pagamento=checkout_url,
+            order_nsu=order_nsu,
             data_pagamento=datetime.utcnow(),
             vencimento_anterior=aluno.vencimento,
             novo_vencimento=calcular_novo_vencimento(aluno.vencimento, dias_final),
@@ -2034,46 +2039,150 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
 
 @app.post("/webhooks/infinitepay")
 def webhook_infinitepay(body: Optional[dict] = Body(default=None), db=Depends(get_db)):
+    """
+    Webhook seguro da InfinitePay.
+
+    Regra principal:
+    - cada checkout é criado com order_nsu único;
+    - esse order_nsu fica salvo na tabela pagamentos;
+    - o webhook só aprova o pagamento que tiver o mesmo order_nsu;
+    - se o webhook repetir, não renova o aluno duas vezes.
+    """
     payload = body or {}
+
+    def nested_get(data, *keys):
+        atual = data
+        for key in keys:
+            if not isinstance(atual, dict):
+                return None
+            atual = atual.get(key)
+        return atual
+
     order_nsu = (
         payload.get("order_nsu")
         or payload.get("orderNsu")
-        or ((payload.get("data") or {}).get("order_nsu"))
-        or ((payload.get("data") or {}).get("orderNsu"))
+        or payload.get("order")
+        or payload.get("order_id")
+        or payload.get("external_id")
+        or nested_get(payload, "data", "order_nsu")
+        or nested_get(payload, "data", "orderNsu")
+        or nested_get(payload, "data", "order")
+        or nested_get(payload, "data", "order_id")
+        or nested_get(payload, "data", "external_id")
+        or nested_get(payload, "invoice", "order_nsu")
+        or nested_get(payload, "invoice", "orderNsu")
+        or nested_get(payload, "invoice", "order")
+        or nested_get(payload, "invoice", "order_id")
+        or nested_get(payload, "invoice", "external_id")
     )
+    order_nsu = str(order_nsu or "").strip()
+
     transaction_status = str(
         payload.get("status")
         or payload.get("payment_status")
-        or ((payload.get("data") or {}).get("status"))
+        or payload.get("transaction_status")
+        or nested_get(payload, "data", "status")
+        or nested_get(payload, "data", "payment_status")
+        or nested_get(payload, "data", "transaction_status")
+        or nested_get(payload, "invoice", "status")
         or ""
-    ).lower()
+    ).strip().lower()
+
+    event_name = str(
+        payload.get("event")
+        or payload.get("event_name")
+        or payload.get("type")
+        or nested_get(payload, "data", "event")
+        or nested_get(payload, "data", "type")
+        or ""
+    ).strip().lower()
 
     if not order_nsu:
-        return {"ok": True, "mensagem": "webhook recebido sem order_nsu"}
+        return {
+            "ok": True,
+            "mensagem": "webhook recebido sem order_nsu; nenhum aluno foi alterado",
+            "status": transaction_status or event_name or "desconhecido",
+        }
 
     pagamento = (
         db.query(PagamentoDB)
-        .filter(PagamentoDB.link_pagamento.isnot(None))
-        .order_by(PagamentoDB.id.desc())
+        .filter(PagamentoDB.order_nsu == order_nsu)
         .first()
     )
 
     if not pagamento:
-        return {"ok": True, "mensagem": "nenhum pagamento pendente encontrado"}
+        return {
+            "ok": True,
+            "mensagem": "pagamento não encontrado para este order_nsu; nenhum aluno foi alterado",
+            "order_nsu": order_nsu,
+            "status": transaction_status or event_name or "desconhecido",
+        }
 
-    aprovado = transaction_status in {"paid", "approved", "completed", "success", "succeeded"}
+    status_aprovado = {"paid", "approved", "completed", "success", "succeeded", "confirmed", "authorized"}
+    evento_aprovado = {"paid", "payment.paid", "invoice.paid", "charge.paid", "checkout.paid", "transaction.paid"}
+    status_cancelado = {"canceled", "cancelled", "failed", "refused", "denied", "expired", "voided", "rejected"}
+
+    aprovado = transaction_status in status_aprovado or event_name in evento_aprovado
+    cancelado = transaction_status in status_cancelado
 
     if aprovado:
-        pagamento.status = "aprovado"
+        # Idempotência: webhook pode chegar mais de uma vez. Não renova duas vezes.
+        if str(pagamento.status or "").lower() in {"aprovado", "pago", "paid", "approved", "completed"}:
+            return {
+                "ok": True,
+                "mensagem": "pagamento já estava aprovado; aluno não foi renovado novamente",
+                "order_nsu": order_nsu,
+                "pagamento": pagamento_dict(pagamento),
+            }
+
         aluno = buscar_aluno_por_id(db, pagamento.aluno_id)
-        if aluno:
-            novo_vencimento = aplicar_pagamento_aluno(db, aluno, pagamento.plano_nome, pagamento.valor, pagamento.dias)
-            pagamento.novo_vencimento = novo_vencimento
+        if not aluno:
+            return {
+                "ok": True,
+                "mensagem": "pagamento encontrado, mas aluno não existe mais; nenhum aluno foi alterado",
+                "order_nsu": order_nsu,
+                "pagamento_id": pagamento.id,
+            }
+
+        pagamento.status = "aprovado"
+        novo_vencimento = aplicar_pagamento_aluno(
+            db,
+            aluno,
+            pagamento.plano_nome,
+            float(pagamento.valor or 0),
+            int(pagamento.dias or 30),
+        )
+        pagamento.novo_vencimento = novo_vencimento
         db.commit()
         db.refresh(pagamento)
-        return {"ok": True, "mensagem": "pagamento aprovado", "pagamento": pagamento_dict(pagamento)}
 
-    return {"ok": True, "mensagem": "webhook recebido", "status": transaction_status or "desconhecido"}
+        return {
+            "ok": True,
+            "mensagem": "pagamento aprovado e aluno atualizado para em dia",
+            "order_nsu": order_nsu,
+            "pagamento": pagamento_dict(pagamento),
+            "aluno": aluno_dict(db, aluno),
+        }
+
+    if cancelado:
+        if str(pagamento.status or "").lower() == "pendente":
+            pagamento.status = "cancelado"
+            db.commit()
+            db.refresh(pagamento)
+        return {
+            "ok": True,
+            "mensagem": "pagamento cancelado/recusado recebido; aluno não foi alterado",
+            "order_nsu": order_nsu,
+            "pagamento": pagamento_dict(pagamento),
+        }
+
+    return {
+        "ok": True,
+        "mensagem": "webhook recebido, mas status ainda não é aprovação",
+        "order_nsu": order_nsu,
+        "status": transaction_status or event_name or "desconhecido",
+        "pagamento": pagamento_dict(pagamento),
+    }
 
 
 @app.post("/pagamentos/{pagamento_id}/aprovar-demo")
