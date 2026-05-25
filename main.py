@@ -10,7 +10,7 @@ import qrcode
 import requests
 from fastapi import FastAPI, HTTPException, Query, Body, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     Boolean,
@@ -28,7 +28,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.0.2"
+APP_VERSION = "5.0.3"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -57,6 +57,7 @@ PROMOCIONAL_DIAS_PADRAO = 30
 
 INFINITEPAY_CHECKOUT_URL = "https://api.infinitepay.io/invoices/public/checkout/links"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://academia-backend-aksl.onrender.com").strip()
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://coliseufit26.netlify.app").strip()
 
 PLANOS_FIXOS = {
     30: {"nome": "Mensal", "valor": MENSAL_VALOR},
@@ -1980,7 +1981,7 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
                 }
             ],
             "order_nsu": order_nsu,
-            "redirect_url": f"{PUBLIC_BASE_URL}/",
+            "redirect_url": f"{PUBLIC_BASE_URL}/pagamentos/retorno",
             "webhook_url": f"{PUBLIC_BASE_URL}/webhooks/infinitepay",
         }
 
@@ -2118,11 +2119,27 @@ def webhook_infinitepay(body: Optional[dict] = Body(default=None), db=Depends(ge
             "status": transaction_status or event_name or "desconhecido",
         }
 
-    status_aprovado = {"paid", "approved", "completed", "success", "succeeded", "confirmed", "authorized"}
-    evento_aprovado = {"paid", "payment.paid", "invoice.paid", "charge.paid", "checkout.paid", "transaction.paid"}
+    status_aprovado = {"paid", "approved", "completed", "success", "succeeded", "confirmed", "authorized", "captured", "paid_out"}
+    evento_aprovado = {"paid", "payment.paid", "invoice.paid", "charge.paid", "checkout.paid", "transaction.paid", "transaction.approved", "payment.approved"}
     status_cancelado = {"canceled", "cancelled", "failed", "refused", "denied", "expired", "voided", "rejected"}
 
-    aprovado = transaction_status in status_aprovado or event_name in evento_aprovado
+    # A InfinitePay pode chamar o webhook sem um campo status claro, mas com dados de transação/recibo.
+    # Quando existe order_nsu + transaction_id/transaction_nsu/receipt_url/capture_method, consideramos pagamento confirmado.
+    sinal_pagamento_real = bool(
+        payload.get("transaction_id")
+        or payload.get("transaction_nsu")
+        or payload.get("receipt_url")
+        or payload.get("capture_method")
+        or nested_get(payload, "data", "transaction_id")
+        or nested_get(payload, "data", "transaction_nsu")
+        or nested_get(payload, "data", "receipt_url")
+        or nested_get(payload, "data", "capture_method")
+        or nested_get(payload, "transaction", "id")
+        or nested_get(payload, "transaction", "nsu")
+        or nested_get(payload, "transaction", "receipt_url")
+    )
+
+    aprovado = transaction_status in status_aprovado or event_name in evento_aprovado or sinal_pagamento_real
     cancelado = transaction_status in status_cancelado
 
     if aprovado:
@@ -2185,7 +2202,46 @@ def webhook_infinitepay(body: Optional[dict] = Body(default=None), db=Depends(ge
     }
 
 
+@app.get("/pagamentos/retorno")
+def retorno_pagamento_infinitepay(
+    order_nsu: Optional[str] = Query(default=None),
+    transaction_id: Optional[str] = Query(default=None),
+    transaction_nsu: Optional[str] = Query(default=None),
+    receipt_url: Optional[str] = Query(default=None),
+    capture_method: Optional[str] = Query(default=None),
+):
+    """Fallback de retorno da InfinitePay.
+    Se o cliente voltar para o backend com order_nsu e dados de transação, aprova o pagamento.
+    Isso complementa o webhook POST e evita deixar aluno pendente quando a InfinitePay não envia status claro.
+    """
+    if not order_nsu:
+        return RedirectResponse(url=FRONTEND_URL)
+
+    db = SessionLocal()
+    try:
+        pagamento = db.query(PagamentoDB).filter(PagamentoDB.order_nsu == str(order_nsu).strip()).first()
+        if pagamento and str(pagamento.status or "").lower() not in {"aprovado", "pago", "paid", "approved", "completed"}:
+            aluno = buscar_aluno_por_id(db, pagamento.aluno_id)
+            if aluno:
+                pagamento.status = "aprovado"
+                novo_vencimento = aplicar_pagamento_aluno(
+                    db,
+                    aluno,
+                    pagamento.plano_nome,
+                    float(pagamento.valor or 0),
+                    int(pagamento.dias or 30),
+                )
+                pagamento.novo_vencimento = novo_vencimento
+                db.commit()
+        return RedirectResponse(url=FRONTEND_URL)
+    except Exception:
+        db.rollback()
+        return RedirectResponse(url=FRONTEND_URL)
+    finally:
+        db.close()
+
+
 @app.post("/pagamentos/{pagamento_id}/aprovar-demo")
 def aprovar_pagamento_demo(pagamento_id: int):
     return {"ok": True, "mensagem": "Modo demo desativado. Use o link real para pagar."}
-# deploy render atualizado
+# deploy render atualizado v5.0.3
