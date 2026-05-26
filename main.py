@@ -28,7 +28,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.0.4"
+APP_VERSION = "5.0.5"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -99,6 +99,7 @@ class AlunoDB(Base):
     beneficio_ativo = Column(Boolean, default=True)
     valor_padrao_plano = Column(Float, nullable=True)
     origem_valor = Column(String, nullable=True)
+    premium_admin = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
@@ -216,6 +217,7 @@ def ensure_schema_updates():
             "beneficio_ativo": "ALTER TABLE alunos ADD COLUMN beneficio_ativo BOOLEAN DEFAULT TRUE",
             "valor_padrao_plano": "ALTER TABLE alunos ADD COLUMN valor_padrao_plano FLOAT",
             "origem_valor": "ALTER TABLE alunos ADD COLUMN origem_valor VARCHAR(50)",
+            "premium_admin": "ALTER TABLE alunos ADD COLUMN premium_admin BOOLEAN DEFAULT FALSE",
             "created_at": "ALTER TABLE alunos ADD COLUMN created_at TIMESTAMP",
             "updated_at": "ALTER TABLE alunos ADD COLUMN updated_at TIMESTAMP",
         }
@@ -371,6 +373,7 @@ class AlunoCreate(BaseModel):
     plano_nome: Optional[str] = None
     dias_plano: Optional[int] = None
     desconto_percentual: Optional[float] = 0.0
+    premium_admin: Optional[bool] = False
 
 class AlunoAdminUpdate(BaseModel):
     nome: str
@@ -383,6 +386,7 @@ class AlunoAdminUpdate(BaseModel):
     desconto_percentual: Optional[float] = None
     vencimento: Optional[str] = None
     status_manual: Optional[Literal["pendente", "em_dia", "atrasado", "inativo"]] = None
+    premium_admin: Optional[bool] = None
 
 class AlunoSelfUpdate(BaseModel):
     nome: str
@@ -492,24 +496,32 @@ def dias_atraso(vencimento: Optional[str]) -> int:
         return 0
     return (hoje() - venc).days
 
+def aluno_premium_admin(aluno: AlunoDB) -> bool:
+    return bool(getattr(aluno, "premium_admin", False))
+
 def obter_status_por_regras(aluno: AlunoDB) -> str:
+    if aluno_premium_admin(aluno):
+        return "em_dia"
+
     manual = (aluno.status_manual or "").strip().lower()
 
-    # Para alunos importados da planilha oficial, respeita o status salvo no banco.
-    if manual in {"em_dia", "atrasado", "inativo", "pendente"}:
+    # Regra nova:
+    # - vencimento hoje ou futuro: em dia;
+    # - até 7 dias após vencer: pendente, ainda pode acessar;
+    # - depois de 7 dias: atrasado, bloqueia catraca.
+    venc = parse_date_safe(aluno.vencimento)
+    if venc:
+        atraso = (hoje() - venc).days
+        if atraso <= 0:
+            return "em_dia"
+        if atraso <= 7:
+            return "pendente"
+        return "atrasado"
+
+    if manual in {"em_dia", "pendente", "atrasado", "inativo"}:
         return manual
 
-    # Se não tiver status manual, usa regra automática como fallback.
-    if not aluno.vencimento:
-        return "pendente"
-
-    atraso = dias_atraso(aluno.vencimento)
-
-    if atraso <= 0:
-        return "em_dia"
-    if atraso > 30:
-        return "inativo"
-    return "atrasado"
+    return "pendente"
 
 def info_plano(db, plano_key: str, valor_override: Optional[float] = None, dias_override: Optional[int] = None):
     plano_key = (plano_key or "").strip().lower()
@@ -610,9 +622,12 @@ def valor_final_aluno(db, aluno: AlunoDB) -> float:
 
 def aluno_dict(db, aluno: AlunoDB) -> dict:
     status = obter_status_por_regras(aluno)
+    premium_admin = aluno_premium_admin(aluno)
     valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, aluno.plano_nome)
     valor_personalizado = float(aluno.valor_personalizado or 0)
     beneficio_ativo = beneficio_ativo_aluno(aluno)
+    atraso = dias_atraso(aluno.vencimento)
+    dias_pendentes_restantes = max(0, 7 - max(atraso, 0)) if status == "pendente" else 0
     return {
         "id": aluno.id,
         "nome": aluno.nome,
@@ -622,6 +637,11 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "sexo": aluno.sexo,
         "status": status,
         "status_manual": aluno.status_manual,
+        "premium_admin": premium_admin,
+        "adm_premium": premium_admin,
+        "acesso_livre": premium_admin,
+        "dias_pendentes_restantes": dias_pendentes_restantes,
+        "aviso_pagamento": ("Acesso vitalício — aluno com privilégio ADM/Premium." if premium_admin else ("Seu pagamento está pendente. Regularize em até 7 dias para evitar o bloqueio do acesso à catraca." if status == "pendente" else None)),
         "plano_nome": aluno.plano_nome,
         "valor_plano": float(aluno.valor_plano or 0),
         "valor_padrao_plano": valor_padrao,
@@ -815,6 +835,7 @@ def criar_aluno(body: AlunoCreate = Body(...)):
         payload_plano = (body.plano_nome or None)
         payload_dias = (body.dias_plano or None)
         payload_desconto = float(body.desconto_percentual or 0)
+        payload_premium_admin = bool(body.premium_admin or False)
 
         if not payload_nome:
             raise HTTPException(status_code=400, detail="Nome obrigatório")
@@ -847,10 +868,12 @@ def criar_aluno(body: AlunoCreate = Body(...)):
     sexo=payload_sexo,
     plano_nome=plano_normalizado,
     valor_plano=valor_plano,
-    vencimento=None,
+    vencimento="2099-12-31" if payload_premium_admin else None,
     data_cadastro=agora_str(),
-    status_cliente_raw="pendente",
-    status_contrato_raw="aguardando_pagamento",
+    status_cliente_raw="Ativo" if payload_premium_admin else "pendente",
+    status_contrato_raw="ADM/Premium" if payload_premium_admin else "aguardando_pagamento",
+    premium_admin=payload_premium_admin,
+    status_manual="em_dia" if payload_premium_admin else "pendente",
 )
         db.add(aluno)
         db.commit()
@@ -948,6 +971,14 @@ def atualizar_aluno_admin(aluno_id: int, body: AlunoAdminUpdate):
             aluno.vencimento = body.vencimento
         if body.status_manual is not None:
             aluno.status_manual = body.status_manual
+        if body.premium_admin is not None:
+            aluno.premium_admin = bool(body.premium_admin)
+            if aluno.premium_admin:
+                aluno.status_manual = "em_dia"
+                aluno.vencimento = "2099-12-31"
+                aluno.beneficio_ativo = True
+                aluno.status_cliente_raw = "Ativo"
+                aluno.status_contrato_raw = "ADM/Premium"
         aluno.updated_at = datetime.utcnow()
 
         db.commit()
@@ -1331,26 +1362,46 @@ def aluno_pode_liberar_catraca(aluno: AlunoDB) -> tuple[bool, str]:
     if not aluno:
         return False, "Aluno não encontrado"
 
+    if aluno_premium_admin(aluno):
+        return True, "Acesso liberado — aluno com privilégio ADM/Premium."
+
     status = obter_status_por_regras(aluno)
     if status == "em_dia":
         return True, "Aluno liberado"
+    if status == "pendente":
+        return True, "Seu pagamento está pendente. Regularize em até 7 dias para evitar o bloqueio do acesso à catraca."
     if status == "atrasado":
-        return False, "Aluno atrasado. Regularize o pagamento."
+        return False, "Aluno atrasado. Regularize o pagamento para liberar a catraca."
     if status == "inativo":
         return False, "Aluno inativo. Procure a recepção."
-    if status == "pendente":
-        return False, "Aluno pendente. Regularize o cadastro/pagamento."
     return False, f"Status não liberado: {status}"
 
 
 def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> None:
-    # motivo curto para manter compatibilidade mesmo se algum banco antigo ainda tiver VARCHAR(16).
+    if aluno_premium_admin(aluno) and status == "liberado":
+        motivo = "Acesso liberado — aluno com privilégio ADM/Premium."
     db.add(EntradaDB(
         aluno_id=aluno.id,
         nome=aluno.nome or "Aluno",
-        status=(status or "liberado")[:16],
-        motivo=(motivo or "catraca")[:16],
+        status=(status or "liberado"),
+        motivo=(motivo or "catraca"),
     ))
+
+
+def cooldown_catraca_restante(db, aluno: AlunoDB) -> int:
+    if aluno_premium_admin(aluno):
+        return 0
+    limite = datetime.utcnow() - timedelta(minutes=5)
+    ultimo = (
+        db.query(EntradaDB)
+        .filter(EntradaDB.aluno_id == aluno.id, EntradaDB.status == "liberado", EntradaDB.data_entrada >= limite)
+        .order_by(EntradaDB.data_entrada.desc())
+        .first()
+    )
+    if not ultimo or not ultimo.data_entrada:
+        return 0
+    restante = 300 - int((datetime.utcnow() - ultimo.data_entrada).total_seconds())
+    return max(0, restante)
 
 
 CATRACA_PEDIDO_TIMEOUT_SECONDS = 12
@@ -1401,6 +1452,17 @@ def solicitar_liberacao_catraca(aluno_id: int):
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
 
         pode, mensagem = aluno_pode_liberar_catraca(aluno)
+
+        if pode:
+            restante = cooldown_catraca_restante(db, aluno)
+            if restante > 0:
+                return {
+                    "ok": False,
+                    "liberado": False,
+                    "cooldown": True,
+                    "segundos_restantes": restante,
+                    "mensagem": f"Aguarde {restante // 60}:{restante % 60:02d} para liberar a catraca novamente.",
+                }
 
         if not pode:
             pedido = LiberacaoCatracaDB(
@@ -1461,6 +1523,7 @@ def solicitar_liberacao_catraca(aluno_id: int):
             atualizado_em=datetime.utcnow(),
         )
         db.add(pedido)
+        registrar_evento_entrada(db, aluno, "liberado", "premium" if aluno_premium_admin(aluno) else ("pendente" if obter_status_por_regras(aluno) == "pendente" else "catraca"))
         db.commit()
         db.refresh(pedido)
 
@@ -1469,7 +1532,9 @@ def solicitar_liberacao_catraca(aluno_id: int):
             "liberado": True,
             "pedido_id": pedido.id,
             "status_pedido": pedido.status,
-            "mensagem": "Pedido enviado. Aguarde a liberação da catraca.",
+            "mensagem": mensagem if aluno_premium_admin(aluno) or obter_status_por_regras(aluno) == "pendente" else "Pedido enviado. Aguarde a liberação da catraca.",
+            "premium_admin": aluno_premium_admin(aluno),
+            "status_aluno": obter_status_por_regras(aluno),
         }
     finally:
         db.close()
@@ -1659,6 +1724,43 @@ def listar_entradas():
             }
             for e in entradas
         ]
+    finally:
+        db.close()
+
+
+@app.get("/aluno/{aluno_id}/progresso")
+def progresso_aluno(aluno_id: int):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        total = (
+            db.query(EntradaDB)
+            .filter(EntradaDB.aluno_id == aluno.id, EntradaDB.status == "liberado")
+            .count()
+        )
+        prog = calcular_progresso(total)
+        metas = [10, 25, 50, 100, 200]
+        proxima = prog.get("proxima_meta", 10)
+        anterior = 0
+        for meta in metas:
+            if total < meta:
+                proxima = meta
+                break
+            anterior = meta
+        span = max(proxima - anterior, 1)
+        percent = max(0, min(100, int(((total - anterior) / span) * 100)))
+        return {
+            "total_entradas": total,
+            "nivel": prog.get("nivel"),
+            "cor": prog.get("cor"),
+            "titulo": "ADM/Premium" if aluno_premium_admin(aluno) else prog.get("nivel", "Começando").title(),
+            "mensagem": "Acesso vitalício com privilégio ADM/Premium." if aluno_premium_admin(aluno) else prog.get("mensagem"),
+            "proxima_meta": proxima,
+            "metas": metas,
+            "progresso_percent": percent,
+        }
     finally:
         db.close()
 
@@ -1871,45 +1973,17 @@ def relatorio_planos():
     finally:
         db.close()
 
-def _pagamento_admin_dict(p: PagamentoDB) -> dict:
-    aluno = getattr(p, "aluno", None)
-    return {
-        "id": p.id,
-        "aluno_id": p.aluno_id,
-        "nome": aluno.nome if aluno else None,
-        "aluno_nome": aluno.nome if aluno else None,
-        "cpf": aluno.cpf if aluno else None,
-        "telefone": aluno.telefone if aluno else None,
-        "plano_nome": p.plano_nome,
-        "valor": float(p.valor or 0),
-        "dias": int(p.dias or 0),
-        "status": p.status,
-        "origem": p.origem,
-        "order_nsu": p.order_nsu,
-        "link_pagamento": p.link_pagamento,
-        "data_pagamento": p.data_pagamento.isoformat() if p.data_pagamento else None,
-        "vencimento_anterior": p.vencimento_anterior,
-        "novo_vencimento": p.novo_vencimento,
-    }
-
-def _pagamento_recebido(p: PagamentoDB) -> bool:
-    s = (p.status or "").strip().lower()
-    return s in {"pago", "aprovado", "approved", "paid", "recebido"} or "aprov" in s or "pago" in s or "paid" in s
-
 @app.get("/relatorio/vendas")
 def relatorio_vendas(periodo: str = "mes"):
     db = SessionLocal()
     try:
         pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
-        recebidos = [p for p in pagamentos if _pagamento_recebido(p)]
-        total = sum(float(p.valor or 0) for p in recebidos)
-        quantidade = len(recebidos)
-        pendentes = len([p for p in pagamentos if not _pagamento_recebido(p)])
+        total = sum(float(p.valor or 0) for p in pagamentos)
+        quantidade = len(pagamentos)
         return {
             "periodo": periodo,
             "total": total,
             "quantidade": quantidade,
-            "pendentes": pendentes,
         }
     finally:
         db.close()
@@ -1918,18 +1992,26 @@ def relatorio_vendas(periodo: str = "mes"):
 def historico_alias():
     db = SessionLocal()
     try:
-        pagamentos = (
-            db.query(PagamentoDB)
-            .order_by(PagamentoDB.data_pagamento.desc(), PagamentoDB.id.desc())
-            .all()
-        )
-        return [_pagamento_admin_dict(p) for p in pagamentos]
+        pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
+        return [
+            {
+                "id": p.id,
+                "aluno_id": p.aluno_id,
+                "nome": p.aluno.nome if getattr(p, "aluno", None) else str(p.aluno_id),
+                "plano_nome": p.plano_nome,
+                "valor": float(p.valor or 0),
+                "dias": int(p.dias or 0),
+                "status": p.status,
+                "origem": p.origem,
+                "order_nsu": p.order_nsu,
+                "link_pagamento": p.link_pagamento,
+                "data_pagamento": p.data_pagamento.isoformat() if p.data_pagamento else None,
+                "novo_vencimento": p.novo_vencimento,
+            }
+            for p in pagamentos
+        ]
     finally:
         db.close()
-
-@app.get("/pagamentos")
-def listar_pagamentos_admin():
-    return historico_alias()
 
 @app.delete("/avisos/{aviso_id}")
 def excluir_aviso(aviso_id: int):
@@ -2285,4 +2367,4 @@ def retorno_pagamento_infinitepay(
 @app.post("/pagamentos/{pagamento_id}/aprovar-demo")
 def aprovar_pagamento_demo(pagamento_id: int):
     return {"ok": True, "mensagem": "Modo demo desativado. Use o link real para pagar."}
-# deploy render atualizado v5.0.3
+# deploy render atualizado v5.0.5
