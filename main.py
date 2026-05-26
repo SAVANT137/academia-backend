@@ -29,7 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.0.6"
+APP_VERSION = "5.0.7"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -87,6 +87,7 @@ class AlunoDB(Base):
     plano_nome = Column(String, nullable=True)
     valor_plano = Column(Float, default=0.0)
     desconto_percentual = Column(Float, default=0.0)
+    desconto_valor = Column(Float, default=0.0)
     vencimento = Column(String, nullable=True)  # YYYY-MM-DD
     data_inicio_plano = Column(String, nullable=True)  # YYYY-MM-DD
     dia_vencimento_fixo = Column(Integer, nullable=True)  # 1..31
@@ -210,6 +211,7 @@ def ensure_schema_updates():
             "plano_nome": "ALTER TABLE alunos ADD COLUMN plano_nome VARCHAR(100)",
             "valor_plano": "ALTER TABLE alunos ADD COLUMN valor_plano FLOAT DEFAULT 0",
             "desconto_percentual": "ALTER TABLE alunos ADD COLUMN desconto_percentual FLOAT DEFAULT 0",
+            "desconto_valor": "ALTER TABLE alunos ADD COLUMN desconto_valor FLOAT DEFAULT 0",
             "vencimento": "ALTER TABLE alunos ADD COLUMN vencimento VARCHAR(20)",
             "data_inicio_plano": "ALTER TABLE alunos ADD COLUMN data_inicio_plano VARCHAR(20)",
             "dia_vencimento_fixo": "ALTER TABLE alunos ADD COLUMN dia_vencimento_fixo INTEGER",
@@ -378,6 +380,7 @@ class AlunoCreate(BaseModel):
     plano_nome: Optional[str] = None
     dias_plano: Optional[int] = None
     desconto_percentual: Optional[float] = 0.0
+    desconto_valor: Optional[float] = 0.0
     premium_admin: Optional[bool] = False
     data_inicio_plano: Optional[str] = None
     vencimento: Optional[str] = None
@@ -392,6 +395,7 @@ class AlunoAdminUpdate(BaseModel):
     plano_nome: Optional[str] = None
     valor_plano: Optional[float] = None
     desconto_percentual: Optional[float] = None
+    desconto_valor: Optional[float] = None
     vencimento: Optional[str] = None
     data_inicio_plano: Optional[str] = None
     dia_vencimento_fixo: Optional[int] = None
@@ -425,7 +429,9 @@ class TreinoCreate(BaseModel):
 
 
 class DescontoBody(BaseModel):
-    desconto_percentual: float = Field(0, ge=0, le=100)
+    # Novo padrão: desconto em reais. Mantemos desconto_percentual só para compatibilidade com versões antigas do app.
+    desconto_valor: Optional[float] = Field(0, ge=0)
+    desconto_percentual: Optional[float] = Field(None, ge=0, le=100)
 
 class PagamentoBody(BaseModel):
     plano: Literal["mensal", "semestral", "anual", "promocional"]
@@ -676,14 +682,22 @@ def beneficio_ativo_aluno(aluno: AlunoDB) -> bool:
 def valor_cobrado_aluno(db, aluno: AlunoDB, plano_nome: Optional[str] = None) -> float:
     plano_ref = plano_nome or aluno.plano_nome
     valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, plano_ref)
+    base = float(aluno.valor_plano or 0) or valor_padrao
+
+    # Novo padrão: desconto em reais.
+    desconto_reais = float(getattr(aluno, "desconto_valor", 0) or 0)
+    if desconto_reais > 0:
+        return round(max(base - desconto_reais, 0.0), 2)
+
+    # Compatibilidade com alunos antigos que já tinham valor final personalizado.
     valor_personalizado = float(aluno.valor_personalizado or 0)
     if beneficio_ativo_aluno(aluno) and valor_personalizado > 0:
         return round(valor_personalizado, 2)
 
-    base = float(aluno.valor_plano or 0) or valor_padrao
+    # Compatibilidade com versões antigas que gravavam percentual.
     desconto = float(aluno.desconto_percentual or 0)
     desconto = max(0.0, min(100.0, desconto))
-    return round(base * (1 - desconto / 100.0), 2)
+    return round(max(base * (1 - desconto / 100.0), 0.0), 2)
 
 
 def desconto_percentual_real(db, aluno: AlunoDB, plano_nome: Optional[str] = None) -> float:
@@ -693,6 +707,22 @@ def desconto_percentual_real(db, aluno: AlunoDB, plano_nome: Optional[str] = Non
     if valor_padrao <= 0 or valor_real >= valor_padrao:
         return float(aluno.desconto_percentual or 0)
     return round(((valor_padrao - valor_real) / valor_padrao) * 100.0, 2)
+
+
+def desconto_valor_real(db, aluno: AlunoDB, plano_nome: Optional[str] = None) -> float:
+    plano_ref = plano_nome or aluno.plano_nome
+    valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, plano_ref)
+    base = float(aluno.valor_plano or 0) or valor_padrao
+    desconto_reais = float(getattr(aluno, "desconto_valor", 0) or 0)
+    if desconto_reais > 0:
+        return round(min(max(desconto_reais, 0.0), max(base, 0.0)), 2)
+    valor_personalizado = float(aluno.valor_personalizado or 0)
+    if valor_personalizado > 0 and base > valor_personalizado:
+        return round(base - valor_personalizado, 2)
+    desconto_pct = float(aluno.desconto_percentual or 0)
+    if desconto_pct > 0:
+        return round(base * (max(0.0, min(100.0, desconto_pct)) / 100.0), 2)
+    return 0.0
 
 
 def valor_final_aluno(db, aluno: AlunoDB) -> float:
@@ -728,6 +758,7 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "beneficio_ativo": beneficio_ativo,
         "origem_valor": aluno.origem_valor,
         "desconto_percentual": desconto_percentual_real(db, aluno),
+        "desconto_valor": desconto_valor_real(db, aluno),
         "valor_final": valor_final_aluno(db, aluno),
         "vencimento": aluno.vencimento,
         "data_inicio_plano": getattr(aluno, "data_inicio_plano", None),
@@ -924,6 +955,7 @@ def criar_aluno(body: AlunoCreate = Body(...)):
         payload_plano = (body.plano_nome or None)
         payload_dias = (body.dias_plano or None)
         payload_desconto = float(body.desconto_percentual or 0)
+        payload_desconto_valor = float(body.desconto_valor or 0)
         payload_premium_admin = bool(body.premium_admin or False)
         payload_data_inicio = normalizar_data_texto(body.data_inicio_plano)
         payload_vencimento = normalizar_data_texto(body.vencimento)
@@ -967,6 +999,8 @@ def criar_aluno(body: AlunoCreate = Body(...)):
     status_cliente_raw="Ativo" if payload_premium_admin else "pendente",
     status_contrato_raw="ADM/Premium" if payload_premium_admin else "aguardando_pagamento",
     premium_admin=payload_premium_admin,
+    desconto_percentual=payload_desconto,
+    desconto_valor=payload_desconto_valor,
     status_manual="em_dia" if payload_premium_admin else "pendente",
 )
         db.add(aluno)
@@ -1061,6 +1095,14 @@ def atualizar_aluno_admin(aluno_id: int, body: AlunoAdminUpdate):
                 aluno.valor_personalizado = body.valor_plano
         if body.desconto_percentual is not None:
             aluno.desconto_percentual = float(body.desconto_percentual)
+        if body.desconto_valor is not None:
+            base_desconto = float(aluno.valor_plano or aluno.valor_padrao_plano or valor_base_plano_nome(db, aluno.plano_nome) or 0)
+            desconto_reais = max(0.0, float(body.desconto_valor or 0))
+            if base_desconto > 0:
+                desconto_reais = min(desconto_reais, base_desconto)
+            aluno.desconto_valor = desconto_reais
+            aluno.valor_personalizado = round(max(base_desconto - desconto_reais, 0.0), 2) if desconto_reais > 0 else None
+            aluno.beneficio_ativo = True
         if body.data_inicio_plano is not None:
             aluno.data_inicio_plano = normalizar_data_texto(body.data_inicio_plano)
         if body.dia_vencimento_fixo is not None:
@@ -1097,14 +1139,29 @@ def atualizar_desconto_aluno(aluno_id: int, body: DescontoBody):
         aluno = buscar_aluno_por_id(db, aluno_id)
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        aluno.desconto_percentual = float(body.desconto_percentual or 0)
-        valor_padrao = float(aluno.valor_padrao_plano or aluno.valor_plano or valor_base_plano_nome(db, aluno.plano_nome))
-        if body.desconto_percentual and body.desconto_percentual > 0:
-            aluno.valor_personalizado = round(valor_padrao * (1 - float(body.desconto_percentual)/100.0), 2)
+
+        valor_base = float(aluno.valor_plano or aluno.valor_padrao_plano or valor_base_plano_nome(db, aluno.plano_nome) or 0)
+
+        # Novo padrão: desconto em reais.
+        if body.desconto_valor is not None:
+            desconto_reais = max(0.0, float(body.desconto_valor or 0))
+            if valor_base > 0:
+                desconto_reais = min(desconto_reais, valor_base)
+            aluno.desconto_valor = desconto_reais
+            aluno.desconto_percentual = round((desconto_reais / valor_base) * 100.0, 2) if valor_base > 0 else 0
+            aluno.valor_personalizado = round(max(valor_base - desconto_reais, 0.0), 2) if desconto_reais > 0 else None
+            aluno.valor_padrao_plano = valor_base
             aluno.beneficio_ativo = True
-        else:
-            aluno.valor_personalizado = None
+        # Compatibilidade com app antigo que ainda mande percentual.
+        elif body.desconto_percentual is not None:
+            pct = max(0.0, min(100.0, float(body.desconto_percentual or 0)))
+            aluno.desconto_percentual = pct
+            desconto_reais = round(valor_base * pct / 100.0, 2) if valor_base > 0 else 0
+            aluno.desconto_valor = desconto_reais
+            aluno.valor_personalizado = round(max(valor_base - desconto_reais, 0.0), 2) if desconto_reais > 0 else None
+            aluno.valor_padrao_plano = valor_base
             aluno.beneficio_ativo = True
+
         aluno.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(aluno)
@@ -2190,11 +2247,13 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
 
-        valor_final = float(body.valor) if body.valor is not None else valor_final_aluno(db, aluno)
+        # Segurança: aluno renova apenas o plano atual com o valor final gravado no cadastro.
+        # Ignoramos valor vindo do frontend para evitar cobrança incorreta.
+        valor_final = valor_final_aluno(db, aluno)
         valor_final = round(max(valor_final, 1.0), 2)
 
-        dias_final = int(body.dias) if body.dias is not None else 30
-        plano_final = (body.plano_nome or aluno.plano_nome or "Mensal").strip()
+        plano_final = (aluno.plano_nome or body.plano_nome or "Mensal").strip()
+        dias_final = int(body.dias) if body.dias is not None else dias_por_plano(plano_final)
         valor_centavos = int(round(valor_final * 100))
         order_nsu = f"aluno_{aluno.id}_{int(datetime.utcnow().timestamp())}"
 
