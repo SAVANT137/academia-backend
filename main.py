@@ -3,6 +3,7 @@ import base64
 import os
 import re
 from datetime import date, datetime, timedelta
+from calendar import monthrange
 from io import BytesIO
 from typing import Optional, Literal
 
@@ -28,7 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.0.5"
+APP_VERSION = "5.0.6"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -87,6 +88,8 @@ class AlunoDB(Base):
     valor_plano = Column(Float, default=0.0)
     desconto_percentual = Column(Float, default=0.0)
     vencimento = Column(String, nullable=True)  # YYYY-MM-DD
+    data_inicio_plano = Column(String, nullable=True)  # YYYY-MM-DD
+    dia_vencimento_fixo = Column(Integer, nullable=True)  # 1..31
 
     foto_url = Column(Text, nullable=True)
     foto_base64 = Column(Text, nullable=True)
@@ -208,6 +211,8 @@ def ensure_schema_updates():
             "valor_plano": "ALTER TABLE alunos ADD COLUMN valor_plano FLOAT DEFAULT 0",
             "desconto_percentual": "ALTER TABLE alunos ADD COLUMN desconto_percentual FLOAT DEFAULT 0",
             "vencimento": "ALTER TABLE alunos ADD COLUMN vencimento VARCHAR(20)",
+            "data_inicio_plano": "ALTER TABLE alunos ADD COLUMN data_inicio_plano VARCHAR(20)",
+            "dia_vencimento_fixo": "ALTER TABLE alunos ADD COLUMN dia_vencimento_fixo INTEGER",
             "foto_url": "ALTER TABLE alunos ADD COLUMN foto_url TEXT",
             "foto_base64": "ALTER TABLE alunos ADD COLUMN foto_base64 TEXT",
             "data_cadastro": "ALTER TABLE alunos ADD COLUMN data_cadastro VARCHAR(50)",
@@ -374,6 +379,9 @@ class AlunoCreate(BaseModel):
     dias_plano: Optional[int] = None
     desconto_percentual: Optional[float] = 0.0
     premium_admin: Optional[bool] = False
+    data_inicio_plano: Optional[str] = None
+    vencimento: Optional[str] = None
+    dia_vencimento_fixo: Optional[int] = None
 
 class AlunoAdminUpdate(BaseModel):
     nome: str
@@ -385,6 +393,8 @@ class AlunoAdminUpdate(BaseModel):
     valor_plano: Optional[float] = None
     desconto_percentual: Optional[float] = None
     vencimento: Optional[str] = None
+    data_inicio_plano: Optional[str] = None
+    dia_vencimento_fixo: Optional[int] = None
     status_manual: Optional[Literal["pendente", "em_dia", "atrasado", "inativo"]] = None
     premium_admin: Optional[bool] = None
 
@@ -485,10 +495,79 @@ def validar_cpf(cpf: str) -> bool:
 def parse_date_safe(value: Optional[str]) -> Optional[date]:
     if not value:
         return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    # Aceita YYYY-MM-DD, timestamp e também DD/MM/YYYY vindo do ADM.
+    candidatos = [raw[:10], raw]
+    for item in candidatos:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(item[:10], fmt).date()
+            except Exception:
+                pass
+    return None
+
+def normalizar_data_texto(value: Optional[str]) -> Optional[str]:
+    data = parse_date_safe(value)
+    return data.strftime("%Y-%m-%d") if data else None
+
+def clamp_dia_vencimento(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
     try:
-        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+        dia = int(value)
     except Exception:
         return None
+    return max(1, min(31, dia))
+
+def meses_por_plano_dias(dias: Optional[int], plano_nome: Optional[str] = None) -> int:
+    nome = (plano_nome or "").strip().lower()
+    d = int(dias or 30)
+    if "anual" in nome or d >= 365:
+        return 12
+    if "sem" in nome or d >= 180:
+        return 6
+    return 1
+
+def data_com_dia_fixo(ano: int, mes: int, dia_fixo: int) -> date:
+    ultimo = monthrange(ano, mes)[1]
+    return date(ano, mes, min(int(dia_fixo), ultimo))
+
+def adicionar_meses_com_dia_fixo(base: date, meses: int, dia_fixo: int) -> date:
+    total = base.month - 1 + int(meses)
+    ano = base.year + total // 12
+    mes = total % 12 + 1
+    return data_com_dia_fixo(ano, mes, dia_fixo)
+
+def inferir_dia_vencimento_fixo(aluno: AlunoDB) -> int:
+    dia = clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None))
+    if dia:
+        return dia
+    venc = parse_date_safe(getattr(aluno, "vencimento", None))
+    if venc:
+        return venc.day
+    inicio = parse_date_safe(getattr(aluno, "data_inicio_plano", None))
+    if inicio:
+        return inicio.day
+    return hoje().day
+
+def calcular_novo_vencimento_fixo(aluno: AlunoDB, dias: Optional[int], plano_nome: Optional[str] = None) -> str:
+    """
+    Calcula renovação sem mudar o dia fixo.
+    Usa o vencimento atual como base; se estiver muito antigo, avança ciclos
+    mantendo o dia fixo até regularizar o aluno em data atual/futura.
+    """
+    meses = meses_por_plano_dias(dias, plano_nome)
+    dia_fixo = inferir_dia_vencimento_fixo(aluno)
+    base = parse_date_safe(getattr(aluno, "vencimento", None)) or hoje()
+    novo = adicionar_meses_com_dia_fixo(base, meses, dia_fixo)
+    # Se o aluno ficou mais de um ciclo atrasado, regulariza para o próximo ciclo útil.
+    seguranca = 0
+    while novo < hoje() and seguranca < 48:
+        novo = adicionar_meses_com_dia_fixo(novo, meses, dia_fixo)
+        seguranca += 1
+    return novo.strftime("%Y-%m-%d")
 
 def dias_atraso(vencimento: Optional[str]) -> int:
     venc = parse_date_safe(vencimento)
@@ -651,6 +730,8 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "desconto_percentual": desconto_percentual_real(db, aluno),
         "valor_final": valor_final_aluno(db, aluno),
         "vencimento": aluno.vencimento,
+        "data_inicio_plano": getattr(aluno, "data_inicio_plano", None),
+        "dia_vencimento_fixo": getattr(aluno, "dia_vencimento_fixo", None),
         "foto_url": aluno.foto_url,
         "foto_base64": aluno.foto_base64,
         "data_cadastro": aluno.data_cadastro,
@@ -695,9 +776,15 @@ def calcular_progresso(total_entradas: int) -> dict:
     }
 
 def calcular_novo_vencimento(vencimento_atual: Optional[str], dias: int) -> str:
+    # Compatibilidade com rotas antigas sem objeto aluno.
     atual = parse_date_safe(vencimento_atual)
-    base = atual if atual and atual >= hoje() else hoje()
-    return (base + timedelta(days=dias)).strftime("%Y-%m-%d")
+    base = atual or hoje()
+    meses = meses_por_plano_dias(dias)
+    dia_fixo = (atual.day if atual else hoje().day)
+    novo = adicionar_meses_com_dia_fixo(base, meses, dia_fixo)
+    while novo < hoje():
+        novo = adicionar_meses_com_dia_fixo(novo, meses, dia_fixo)
+    return novo.strftime("%Y-%m-%d")
 
 def pagamento_dict(p: PagamentoDB) -> dict:
     return {
@@ -729,7 +816,9 @@ def aplicar_pagamento_aluno(db, aluno: AlunoDB, plano_nome: str, valor: float, d
             plano_key = "mensal"
 
     plano_info = info_plano(db, plano_key, valor_override=valor, dias_override=dias)
-    novo_vencimento = calcular_novo_vencimento(aluno.vencimento, int(plano_info["dias"]))
+    if not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
+        aluno.dia_vencimento_fixo = inferir_dia_vencimento_fixo(aluno)
+    novo_vencimento = calcular_novo_vencimento_fixo(aluno, int(plano_info["dias"]), plano_info["nome"])
 
     aluno.plano_nome = plano_info["nome"]
     aluno.valor_padrao_plano = valor_base_plano_nome(db, plano_info["nome"])
@@ -836,6 +925,9 @@ def criar_aluno(body: AlunoCreate = Body(...)):
         payload_dias = (body.dias_plano or None)
         payload_desconto = float(body.desconto_percentual or 0)
         payload_premium_admin = bool(body.premium_admin or False)
+        payload_data_inicio = normalizar_data_texto(body.data_inicio_plano)
+        payload_vencimento = normalizar_data_texto(body.vencimento)
+        payload_dia_fixo = clamp_dia_vencimento(body.dia_vencimento_fixo)
 
         if not payload_nome:
             raise HTTPException(status_code=400, detail="Nome obrigatório")
@@ -868,7 +960,9 @@ def criar_aluno(body: AlunoCreate = Body(...)):
     sexo=payload_sexo,
     plano_nome=plano_normalizado,
     valor_plano=valor_plano,
-    vencimento="2099-12-31" if payload_premium_admin else None,
+    vencimento=None if payload_premium_admin else payload_vencimento,
+    data_inicio_plano=None if payload_premium_admin else (payload_data_inicio or hoje_str()),
+    dia_vencimento_fixo=None if payload_premium_admin else (payload_dia_fixo or ((parse_date_safe(payload_vencimento) or parse_date_safe(payload_data_inicio) or hoje()).day)),
     data_cadastro=agora_str(),
     status_cliente_raw="Ativo" if payload_premium_admin else "pendente",
     status_contrato_raw="ADM/Premium" if payload_premium_admin else "aguardando_pagamento",
@@ -967,18 +1061,26 @@ def atualizar_aluno_admin(aluno_id: int, body: AlunoAdminUpdate):
                 aluno.valor_personalizado = body.valor_plano
         if body.desconto_percentual is not None:
             aluno.desconto_percentual = float(body.desconto_percentual)
+        if body.data_inicio_plano is not None:
+            aluno.data_inicio_plano = normalizar_data_texto(body.data_inicio_plano)
+        if body.dia_vencimento_fixo is not None:
+            aluno.dia_vencimento_fixo = clamp_dia_vencimento(body.dia_vencimento_fixo)
         if body.vencimento is not None:
-            aluno.vencimento = body.vencimento
+            aluno.vencimento = normalizar_data_texto(body.vencimento)
         if body.status_manual is not None:
             aluno.status_manual = body.status_manual
         if body.premium_admin is not None:
             aluno.premium_admin = bool(body.premium_admin)
             if aluno.premium_admin:
                 aluno.status_manual = "em_dia"
-                aluno.vencimento = "2099-12-31"
+                aluno.vencimento = None
+                aluno.data_inicio_plano = None
+                aluno.dia_vencimento_fixo = None
                 aluno.beneficio_ativo = True
                 aluno.status_cliente_raw = "Ativo"
                 aluno.status_contrato_raw = "ADM/Premium"
+        if not aluno.premium_admin and not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
+            aluno.dia_vencimento_fixo = inferir_dia_vencimento_fixo(aluno)
         aluno.updated_at = datetime.utcnow()
 
         db.commit()
@@ -1070,7 +1172,10 @@ def registrar_pagamento(aluno_id: int, body: PagamentoBody):
         plano = info_plano(db, body.plano, body.valor, body.dias)
         valor_final = valor_cobrado_aluno(db, aluno, plano["nome"])
         vencimento_anterior = aluno.vencimento
-        novo_vencimento = calcular_novo_vencimento(aluno.vencimento, plano["dias"])
+        
+        if not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
+            aluno.dia_vencimento_fixo = inferir_dia_vencimento_fixo(aluno)
+        novo_vencimento = calcular_novo_vencimento_fixo(aluno, plano["dias"], plano["nome"])
 
         aluno.plano_nome = plano["nome"]
         aluno.valor_padrao_plano = valor_base_plano_nome(db, plano["nome"])
@@ -2142,7 +2247,7 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
             order_nsu=order_nsu,
             data_pagamento=datetime.utcnow(),
             vencimento_anterior=aluno.vencimento,
-            novo_vencimento=calcular_novo_vencimento(aluno.vencimento, dias_final),
+            novo_vencimento=calcular_novo_vencimento_fixo(aluno, dias_final, plano_final),
         )
         db.add(pagamento)
         db.commit()
