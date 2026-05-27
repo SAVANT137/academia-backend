@@ -29,7 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.0.7"
+APP_VERSION = "5.0.8"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -434,7 +434,7 @@ class DescontoBody(BaseModel):
     desconto_percentual: Optional[float] = Field(None, ge=0, le=100)
 
 class PagamentoBody(BaseModel):
-    plano: Literal["mensal", "semestral", "anual", "promocional"]
+    plano: Literal["atual", "mensal", "semestral", "anual", "promocional"]
     valor: Optional[float] = None
     dias: Optional[int] = None
     origem: Literal["manual", "aluno_link"] = "manual"
@@ -1226,30 +1226,45 @@ def registrar_pagamento(aluno_id: int, body: PagamentoBody):
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
 
-        plano = info_plano(db, body.plano, body.valor, body.dias)
-        valor_final = valor_cobrado_aluno(db, aluno, plano["nome"])
+        plano_key = (body.plano or "atual").strip().lower()
         vencimento_anterior = aluno.vencimento
-        
+
         if not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
             aluno.dia_vencimento_fixo = inferir_dia_vencimento_fixo(aluno)
-        novo_vencimento = calcular_novo_vencimento_fixo(aluno, plano["dias"], plano["nome"])
 
-        aluno.plano_nome = plano["nome"]
-        aluno.valor_padrao_plano = valor_base_plano_nome(db, plano["nome"])
-        if not beneficio_ativo_aluno(aluno):
+        if plano_key == "atual":
+            plano_nome = aluno.plano_nome or "Mensal"
+            dias = int(body.dias or (365 if plano_nome.lower() == "anual" else 180 if plano_nome.lower() == "semestral" else 30))
+            valor_final = valor_final_aluno(db, aluno)
+            novo_vencimento = calcular_novo_vencimento_fixo(aluno, dias, plano_nome)
+            # Mantém plano, valor base, desconto e dia fixo atuais.
+        else:
+            plano = info_plano(db, plano_key, None, None)
+            plano_nome = plano["nome"]
+            dias = int(plano["dias"])
+            valor_base = float(plano["valor"])
+            desconto_reais = float(getattr(aluno, "desconto_valor", 0) or 0)
+            desconto_reais = min(max(desconto_reais, 0.0), max(valor_base, 0.0))
+            valor_final = round(max(valor_base - desconto_reais, 0.0), 2)
+            novo_vencimento = calcular_novo_vencimento_fixo(aluno, dias, plano_nome)
+
+            aluno.plano_nome = plano_nome
+            aluno.valor_padrao_plano = valor_base
+            aluno.valor_plano = valor_base
             aluno.valor_personalizado = None
-        aluno.valor_plano = valor_cobrado_aluno(db, aluno, plano["nome"])
+            aluno.beneficio_ativo = bool(desconto_reais > 0)
+
         aluno.vencimento = novo_vencimento
         aluno.status_manual = "em_dia"
         aluno.updated_at = datetime.utcnow()
 
         pagamento = PagamentoDB(
             aluno_id=aluno.id,
-            plano_nome=plano["nome"],
+            plano_nome=plano_nome,
             valor=valor_final,
-            dias=int(plano["dias"]),
+            dias=int(dias),
             status="pago",
-            origem=body.origem,
+            origem="manual_admin" if body.origem == "manual" else body.origem,
             data_pagamento=datetime.utcnow(),
             vencimento_anterior=vencimento_anterior,
             novo_vencimento=novo_vencimento,
@@ -1260,8 +1275,9 @@ def registrar_pagamento(aluno_id: int, body: PagamentoBody):
 
         return {
             "ok": True,
-            "message": "Pagamento registrado com sucesso",
+            "message": "Pagamento regularizado manualmente pelo administrador",
             "aluno": aluno_dict(db, aluno),
+            "pagamento": pagamento_dict(pagamento),
         }
     finally:
         db.close()
