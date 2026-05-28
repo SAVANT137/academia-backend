@@ -29,7 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.0.8"
+APP_VERSION = "5.0.9"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -55,6 +55,8 @@ SEMESTRAL_VALOR = 720.0
 ANUAL_VALOR = 1320.0
 PROMOCIONAL_VALOR_PADRAO = 80.90
 PROMOCIONAL_DIAS_PADRAO = 30
+DIARIA_VALOR = 35.0
+GYMPASS_VALOR = 0.0
 
 INFINITEPAY_CHECKOUT_URL = "https://api.infinitepay.io/invoices/public/checkout/links"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://academia-backend-aksl.onrender.com").strip()
@@ -122,6 +124,9 @@ class PagamentoDB(Base):
     data_pagamento = Column(DateTime, default=datetime.utcnow)
     vencimento_anterior = Column(String, nullable=True)
     novo_vencimento = Column(String, nullable=True)
+    reembolsado_em = Column(DateTime, nullable=True)
+    pagamento_reembolsado_id = Column(Integer, nullable=True)
+    observacao = Column(Text, nullable=True)
 
     aluno = relationship("AlunoDB")
 
@@ -185,6 +190,26 @@ class LiberacaoCatracaDB(Base):
     aluno = relationship("AlunoDB")
 
 
+class GympassSolicitacaoDB(Base):
+    __tablename__ = "gympass_solicitacoes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
+    cpf = Column(Text, nullable=True)
+    nome = Column(Text, nullable=True)
+    status = Column(Text, default="solicitado", index=True)
+    # solicitado | liberado | negado | expirado
+    usado_no_dia = Column(Integer, default=0)
+    liberado_por_id = Column(Integer, nullable=True)
+    liberado_por_nome = Column(Text, nullable=True)
+    observacao = Column(Text, nullable=True)
+    criado_em = Column(DateTime, default=datetime.utcnow, index=True)
+    liberado_em = Column(DateTime, nullable=True)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+    aluno = relationship("AlunoDB")
+
+
 def ensure_schema_updates():
     """
     Mantém o banco compatível com o app mesmo quando o PostgreSQL é recriado vazio
@@ -225,6 +250,7 @@ def ensure_schema_updates():
             "valor_padrao_plano": "ALTER TABLE alunos ADD COLUMN valor_padrao_plano FLOAT",
             "origem_valor": "ALTER TABLE alunos ADD COLUMN origem_valor VARCHAR(50)",
             "premium_admin": "ALTER TABLE alunos ADD COLUMN premium_admin BOOLEAN DEFAULT FALSE",
+            "gympass_acessos_dia": "ALTER TABLE alunos ADD COLUMN gympass_acessos_dia INTEGER DEFAULT 0",
             "created_at": "ALTER TABLE alunos ADD COLUMN created_at TIMESTAMP",
             "updated_at": "ALTER TABLE alunos ADD COLUMN updated_at TIMESTAMP",
         }
@@ -248,7 +274,7 @@ def ensure_schema_updates():
     # conflitos de índice em bancos antigos; criamos só o que estiver faltando.
     insp = inspect(engine)
     table_names = set(insp.get_table_names())
-    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB]:
+    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB]:
         if model.__tablename__ not in table_names:
             try:
                 model.__table__.create(bind=engine, checkfirst=True)
@@ -276,6 +302,9 @@ def ensure_schema_updates():
             "data_pagamento": "ALTER TABLE pagamentos ADD COLUMN data_pagamento TIMESTAMP",
             "vencimento_anterior": "ALTER TABLE pagamentos ADD COLUMN vencimento_anterior VARCHAR(30)",
             "novo_vencimento": "ALTER TABLE pagamentos ADD COLUMN novo_vencimento VARCHAR(30)",
+            "reembolsado_em": "ALTER TABLE pagamentos ADD COLUMN reembolsado_em TIMESTAMP",
+            "pagamento_reembolsado_id": "ALTER TABLE pagamentos ADD COLUMN pagamento_reembolsado_id INTEGER",
+            "observacao": "ALTER TABLE pagamentos ADD COLUMN observacao TEXT",
         }
 
         for col_name, cmd in expected_columns.items():
@@ -298,6 +327,7 @@ def ensure_schema_updates():
                     "ALTER TABLE pagamentos ALTER COLUMN order_nsu TYPE VARCHAR(120)",
                     "ALTER TABLE pagamentos ALTER COLUMN vencimento_anterior TYPE VARCHAR(30)",
                     "ALTER TABLE pagamentos ALTER COLUMN novo_vencimento TYPE VARCHAR(30)",
+                    "ALTER TABLE pagamentos ALTER COLUMN observacao TYPE TEXT",
                 ]
                 for cmd in safe_alters:
                     try:
@@ -434,7 +464,7 @@ class DescontoBody(BaseModel):
     desconto_percentual: Optional[float] = Field(None, ge=0, le=100)
 
 class PagamentoBody(BaseModel):
-    plano: Literal["atual", "mensal", "semestral", "anual", "promocional"]
+    plano: Literal["atual", "mensal", "semestral", "anual", "promocional", "diaria", "gympass"]
     valor: Optional[float] = None
     dias: Optional[int] = None
     origem: Literal["manual", "aluno_link"] = "manual"
@@ -457,6 +487,15 @@ class CriarPagamentoCheckoutBody(BaseModel):
     dias: Optional[int] = None
     valor: Optional[float] = None
     plano_nome: Optional[str] = None
+
+class GympassResponderBody(BaseModel):
+    liberado_por_id: Optional[int] = None
+    liberado_por_nome: Optional[str] = None
+    observacao: Optional[str] = None
+
+class ReembolsoBody(BaseModel):
+    observacao: Optional[str] = None
+    usuario_admin: Optional[str] = None
 
 # ----------------------
 # Helpers
@@ -530,6 +569,10 @@ def clamp_dia_vencimento(value: Optional[int]) -> Optional[int]:
 def meses_por_plano_dias(dias: Optional[int], plano_nome: Optional[str] = None) -> int:
     nome = (plano_nome or "").strip().lower()
     d = int(dias or 30)
+    if "gympass" in nome or d <= 0:
+        return 0
+    if "diária" in nome or "diaria" in nome or d <= 1:
+        return 0
     if "anual" in nome or d >= 365:
         return 12
     if "sem" in nome or d >= 180:
@@ -564,6 +607,11 @@ def calcular_novo_vencimento_fixo(aluno: AlunoDB, dias: Optional[int], plano_nom
     Usa o vencimento atual como base; se estiver muito antigo, avança ciclos
     mantendo o dia fixo até regularizar o aluno em data atual/futura.
     """
+    nome_plano = (plano_nome or "").strip().lower()
+    if "diária" in nome_plano or "diaria" in nome_plano or int(dias or 0) <= 1:
+        return hoje().strftime("%Y-%m-%d")
+    if "gympass" in nome_plano:
+        return None
     meses = meses_por_plano_dias(dias, plano_nome)
     dia_fixo = inferir_dia_vencimento_fixo(aluno)
     base = parse_date_safe(getattr(aluno, "vencimento", None)) or hoje()
@@ -588,21 +636,24 @@ def obter_status_por_regras(aluno: AlunoDB) -> str:
     if aluno_premium_admin(aluno):
         return "em_dia"
 
-    manual = (aluno.status_manual or "").strip().lower()
+    plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
+    if "gympass" in plano:
+        return "em_dia"
 
-    # Regra nova:
-    # - vencimento hoje ou futuro: em dia;
-    # - até 7 dias após vencer: pendente, ainda pode acessar;
-    # - depois de 7 dias: atrasado, bloqueia catraca.
     venc = parse_date_safe(aluno.vencimento)
     if venc:
-        atraso = (hoje() - venc).days
-        if atraso <= 0:
-            return "em_dia"
-        if atraso <= 7:
+        faltam = (venc - hoje()).days
+        # Regra 5.0.9:
+        # em_dia = faltam mais de 3 dias para vencer;
+        # pendente = faltam 3 dias ou menos, mas ainda não venceu;
+        # atrasado = venceu e não pagou. O dia do vencimento ainda é válido.
+        if faltam < 0:
+            return "atrasado"
+        if faltam <= 3:
             return "pendente"
-        return "atrasado"
+        return "em_dia"
 
+    manual = (aluno.status_manual or "").strip().lower()
     if manual in {"em_dia", "pendente", "atrasado", "inativo"}:
         return manual
 
@@ -618,6 +669,9 @@ def info_plano(db, plano_key: str, valor_override: Optional[float] = None, dias_
         "semestral": {"nome": "Semestral", "valor": SEMESTRAL_VALOR, "dias": 180},
         "anual": {"nome": "Anual", "valor": ANUAL_VALOR, "dias": 365},
         "promocional": {"nome": "Promocional", "valor": promocional_valor, "dias": promocional_dias},
+        "diaria": {"nome": "Diária", "valor": DIARIA_VALOR, "dias": 1},
+        "diária": {"nome": "Diária", "valor": DIARIA_VALOR, "dias": 1},
+        "gympass": {"nome": "Gympass", "valor": GYMPASS_VALOR, "dias": 0},
     }
     item = tabela.get(plano_key)
     if not item:
@@ -666,11 +720,15 @@ def buscar_aluno_por_cpf(db, cpf: str) -> Optional[AlunoDB]:
 
 def valor_base_plano_nome(db, plano_nome: Optional[str]) -> float:
     nome = (plano_nome or "Mensal").strip().lower()
-    if nome == "anual":
+    if "anual" in nome:
         return ANUAL_VALOR
-    if nome == "semestral":
+    if "sem" in nome:
         return SEMESTRAL_VALOR
-    if nome == "promocional":
+    if "diária" in nome or "diaria" in nome:
+        return DIARIA_VALOR
+    if "gympass" in nome:
+        return GYMPASS_VALOR
+    if "promo" in nome:
         return float(get_config(db, "promocional_valor", str(PROMOCIONAL_VALOR_PADRAO)))
     return MENSAL_VALOR
 
@@ -735,8 +793,9 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
     valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, aluno.plano_nome)
     valor_personalizado = float(aluno.valor_personalizado or 0)
     beneficio_ativo = beneficio_ativo_aluno(aluno)
-    atraso = dias_atraso(aluno.vencimento)
-    dias_pendentes_restantes = max(0, 7 - max(atraso, 0)) if status == "pendente" else 0
+    venc = parse_date_safe(aluno.vencimento)
+    dias_para_vencer = (venc - hoje()).days if venc else None
+    dias_pendentes_restantes = max(0, int(dias_para_vencer or 0)) if status == "pendente" else 0
     return {
         "id": aluno.id,
         "nome": aluno.nome,
@@ -750,7 +809,9 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "adm_premium": premium_admin,
         "acesso_livre": premium_admin,
         "dias_pendentes_restantes": dias_pendentes_restantes,
-        "aviso_pagamento": ("Acesso vitalício — aluno com privilégio ADM/Premium." if premium_admin else ("Seu pagamento está pendente. Regularize em até 7 dias para evitar o bloqueio do acesso à catraca." if status == "pendente" else None)),
+        "dias_para_vencer": dias_para_vencer,
+        "gympass": "gympass" in (aluno.plano_nome or "").strip().lower(),
+        "aviso_pagamento": ("Acesso vitalício — aluno com privilégio ADM/Premium." if premium_admin else ("Sua mensalidade está próxima do vencimento. Regularize o pagamento para evitar o bloqueio do acesso à catraca." if status == "pendente" else None)),
         "plano_nome": aluno.plano_nome,
         "valor_plano": float(aluno.valor_plano or 0),
         "valor_padrao_plano": valor_padrao,
@@ -910,6 +971,8 @@ def obter_config_planos():
                 "dias": int(get_config(db, "promocional_dias", str(PROMOCIONAL_DIAS_PADRAO))),
                 "link": obter_link_plano(db, "promocional"),
             },
+            "diaria": {"valor": DIARIA_VALOR, "dias": 1, "link": ""},
+            "gympass": {"valor": GYMPASS_VALOR, "dias": 0, "link": ""},
         }
     finally:
         db.close()
@@ -983,6 +1046,14 @@ def criar_aluno(body: AlunoCreate = Body(...)):
             except Exception:
                 plano_normalizado = payload_plano
                 valor_plano = 0.0
+        elif payload_dias is not None:
+            try:
+                key = "diaria" if int(payload_dias) <= 1 else "anual" if int(payload_dias) >= 365 else "semestral" if int(payload_dias) >= 180 else "mensal"
+                plano_info = info_plano(db, key)
+                plano_normalizado = plano_info["nome"]
+                valor_plano = float(plano_info["valor"])
+            except Exception:
+                pass
 
         aluno = AlunoDB(
     nome=payload_nome,
@@ -1302,6 +1373,10 @@ def listar_pagamentos_aluno(aluno_id: int):
                 "origem": p.origem,
                 "data_pagamento": p.data_pagamento.isoformat(),
                 "novo_vencimento": p.novo_vencimento,
+                "vencimento_anterior": p.vencimento_anterior,
+                "reembolsado_em": p.reembolsado_em.isoformat() if getattr(p, "reembolsado_em", None) else None,
+                "pagamento_reembolsado_id": getattr(p, "pagamento_reembolsado_id", None),
+                "observacao": getattr(p, "observacao", None),
             }
             for p in pagamentos
         ]
@@ -1543,17 +1618,20 @@ def aluno_pode_liberar_catraca(aluno: AlunoDB) -> tuple[bool, str]:
     if aluno_premium_admin(aluno):
         return True, "Acesso liberado — aluno com privilégio ADM/Premium."
 
+    plano = (aluno.plano_nome or "").strip().lower()
+    if "gympass" in plano:
+        return False, "Gympass exige liberação de professor/ADM."
+
     status = obter_status_por_regras(aluno)
     if status == "em_dia":
         return True, "Aluno liberado"
     if status == "pendente":
-        return True, "Seu pagamento está pendente. Regularize em até 7 dias para evitar o bloqueio do acesso à catraca."
+        return True, "Aluno pendente: mensalidade próxima do vencimento. Acesso liberado preventivamente."
     if status == "atrasado":
-        return False, "Aluno atrasado. Regularize o pagamento para liberar a catraca."
+        return False, "Aluno atrasado. Regularize o pagamento."
     if status == "inativo":
         return False, "Aluno inativo. Procure a recepção."
     return False, f"Status não liberado: {status}"
-
 
 def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> None:
     if aluno_premium_admin(aluno) and status == "liberado":
@@ -1628,6 +1706,32 @@ def solicitar_liberacao_catraca(aluno_id: int):
         aluno = buscar_aluno_por_id(db, aluno_id)
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
+
+        if aluno_eh_gympass(aluno) and not aluno_premium_admin(aluno):
+            usados = gympass_usados_hoje(db, aluno.id)
+            if usados >= 2:
+                return {
+                    "ok": False,
+                    "liberado": False,
+                    "gympass": True,
+                    "mensagem": "Você já utilizou seus 2 acessos Gympass de hoje. Tente novamente amanhã.",
+                }
+            solicitacao = GympassSolicitacaoDB(
+                aluno_id=aluno.id, cpf=aluno.cpf, nome=aluno.nome,
+                status="solicitado", usado_no_dia=usados + 1,
+                observacao="Solicitação criada pelo app do aluno", atualizado_em=datetime.utcnow(),
+            )
+            db.add(solicitacao)
+            db.commit()
+            db.refresh(solicitacao)
+            return {
+                "ok": True,
+                "liberado": False,
+                "gympass": True,
+                "solicitacao_id": solicitacao.id,
+                "usados_hoje": usados + 1,
+                "mensagem": "Solicitação enviada. Aguarde um professor liberar seu acesso.",
+            }
 
         pode, mensagem = aluno_pode_liberar_catraca(aluno)
 
@@ -1942,6 +2046,133 @@ def progresso_aluno(aluno_id: int):
     finally:
         db.close()
 
+
+# ----------------------
+# Gympass
+# ----------------------
+@app.get("/gympass/solicitacoes")
+def listar_gympass_solicitacoes(status: Optional[str] = Query(default=None), limite: int = Query(default=100)):
+    db = SessionLocal()
+    try:
+        query = db.query(GympassSolicitacaoDB).order_by(GympassSolicitacaoDB.criado_em.desc())
+        if status:
+            query = query.filter(GympassSolicitacaoDB.status == status.strip().lower())
+        itens = query.limit(max(1, min(limite, 300))).all()
+        return [
+            {
+                "id": g.id,
+                "aluno_id": g.aluno_id,
+                "nome": g.nome,
+                "cpf": g.cpf,
+                "status": g.status,
+                "usado_no_dia": g.usado_no_dia,
+                "liberado_por_id": g.liberado_por_id,
+                "liberado_por_nome": g.liberado_por_nome,
+                "observacao": g.observacao,
+                "criado_em": g.criado_em.isoformat() if g.criado_em else None,
+                "liberado_em": g.liberado_em.isoformat() if g.liberado_em else None,
+            }
+            for g in itens
+        ]
+    finally:
+        db.close()
+
+@app.post("/gympass/solicitacoes/{solicitacao_id}/liberar")
+def liberar_gympass_solicitacao(solicitacao_id: int, body: GympassResponderBody = Body(default=GympassResponderBody())):
+    db = SessionLocal()
+    try:
+        solicitacao = db.query(GympassSolicitacaoDB).filter(GympassSolicitacaoDB.id == solicitacao_id).first()
+        if not solicitacao:
+            raise HTTPException(status_code=404, detail="Solicitação Gympass não encontrada")
+        if solicitacao.status == "liberado":
+            return {"ok": True, "message": "Solicitação já liberada"}
+        if solicitacao.status == "negado":
+            raise HTTPException(status_code=400, detail="Solicitação já foi negada")
+        aluno = buscar_aluno_por_id(db, solicitacao.aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        solicitacao.status = "liberado"
+        solicitacao.liberado_por_id = body.liberado_por_id
+        solicitacao.liberado_por_nome = body.liberado_por_nome or "ADM/Professor"
+        solicitacao.observacao = body.observacao or "Acesso Gympass liberado manualmente"
+        solicitacao.liberado_em = datetime.utcnow()
+        solicitacao.atualizado_em = datetime.utcnow()
+        pedido = LiberacaoCatracaDB(
+            aluno_id=aluno.id, cpf=aluno.cpf, nome=aluno.nome, status="pendente",
+            segundos=5, sentido="ambos", motivo="gympass", atualizado_em=datetime.utcnow(),
+        )
+        db.add(pedido)
+        registrar_evento_entrada(db, aluno, "liberado", "gympass")
+        db.commit()
+        db.refresh(pedido)
+        return {"ok": True, "message": "Acesso Gympass liberado", "pedido_id": pedido.id}
+    finally:
+        db.close()
+
+@app.post("/gympass/solicitacoes/{solicitacao_id}/negar")
+def negar_gympass_solicitacao(solicitacao_id: int, body: GympassResponderBody = Body(default=GympassResponderBody())):
+    db = SessionLocal()
+    try:
+        solicitacao = db.query(GympassSolicitacaoDB).filter(GympassSolicitacaoDB.id == solicitacao_id).first()
+        if not solicitacao:
+            raise HTTPException(status_code=404, detail="Solicitação Gympass não encontrada")
+        solicitacao.status = "negado"
+        solicitacao.liberado_por_id = body.liberado_por_id
+        solicitacao.liberado_por_nome = body.liberado_por_nome or "ADM/Professor"
+        solicitacao.observacao = body.observacao or "Solicitação Gympass negada"
+        solicitacao.atualizado_em = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "message": "Solicitação Gympass negada"}
+    finally:
+        db.close()
+
+# ----------------------
+# Reembolso manual
+# ----------------------
+@app.post("/pagamentos/reembolso/{aluno_id}")
+def reembolsar_ultimo_pagamento(aluno_id: int, body: ReembolsoBody = Body(default=ReembolsoBody())):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        pagamento = (
+            db.query(PagamentoDB)
+            .filter(
+                PagamentoDB.aluno_id == aluno.id,
+                PagamentoDB.status.in_(["pago", "aprovado"]),
+            )
+            .order_by(PagamentoDB.data_pagamento.desc(), PagamentoDB.id.desc())
+            .first()
+        )
+        if not pagamento:
+            raise HTTPException(status_code=404, detail="Nenhum pagamento válido encontrado para reembolso")
+        vencimento_atual = aluno.vencimento
+        aluno.vencimento = pagamento.vencimento_anterior
+        aluno.updated_at = datetime.utcnow()
+        pagamento.status = "reembolsado"
+        pagamento.reembolsado_em = datetime.utcnow()
+        pagamento.observacao = body.observacao or "Reembolso registrado manualmente pelo administrador"
+        registro = PagamentoDB(
+            aluno_id=aluno.id,
+            plano_nome=pagamento.plano_nome,
+            valor=-abs(float(pagamento.valor or 0)),
+            dias=0,
+            status="reembolso",
+            origem="manual_admin_reembolso",
+            data_pagamento=datetime.utcnow(),
+            vencimento_anterior=vencimento_atual,
+            novo_vencimento=aluno.vencimento,
+            pagamento_reembolsado_id=pagamento.id,
+            observacao=f"Reembolso do pagamento #{pagamento.id}. {body.observacao or ''}".strip(),
+        )
+        db.add(registro)
+        db.commit()
+        db.refresh(aluno)
+        return {"ok": True, "message": "Reembolso registrado", "aluno": aluno_dict(db, aluno), "pagamento_reembolsado": pagamento_dict(pagamento)}
+    finally:
+        db.close()
+
 # ----------------------
 # Relatórios
 # ----------------------
@@ -2141,7 +2372,7 @@ def relatorio_planos():
     db = SessionLocal()
     try:
         alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).all()]
-        nomes = ["Mensal", "Semestral", "Anual", "Promocional"]
+        nomes = ["Mensal", "Semestral", "Anual", "Promocional", "Diária", "Gympass"]
         contagem = {n: 0 for n in nomes}
         for a in alunos:
             plano = (a.get("plano_nome") or "").strip().title()
@@ -2185,6 +2416,10 @@ def historico_alias():
                 "link_pagamento": p.link_pagamento,
                 "data_pagamento": p.data_pagamento.isoformat() if p.data_pagamento else None,
                 "novo_vencimento": p.novo_vencimento,
+                "vencimento_anterior": p.vencimento_anterior,
+                "reembolsado_em": p.reembolsado_em.isoformat() if getattr(p, "reembolsado_em", None) else None,
+                "pagamento_reembolsado_id": getattr(p, "pagamento_reembolsado_id", None),
+                "observacao": getattr(p, "observacao", None),
             }
             for p in pagamentos
         ]
