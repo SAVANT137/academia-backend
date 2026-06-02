@@ -29,7 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.0.9"
+APP_VERSION = "5.1.2"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -58,7 +58,7 @@ PROMOCIONAL_DIAS_PADRAO = 30
 DIARIA_VALOR = 35.0
 GYMPASS_VALOR = 0.0
 
-INFINITEPAY_CHECKOUT_URL = "https://api.infinitepay.io/invoices/public/checkout/links"
+INFINITEPAY_CHECKOUT_URL = "https://api.checkout.infinitepay.io/links"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://academia-backend-aksl.onrender.com").strip()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://coliseufit26.netlify.app").strip()
 
@@ -105,6 +105,10 @@ class AlunoDB(Base):
     beneficio_ativo = Column(Boolean, default=True)
     valor_padrao_plano = Column(Float, nullable=True)
     origem_valor = Column(String, nullable=True)
+    valor_final_manual = Column(Float, nullable=True)
+    valor_final_manual_ativo = Column(Boolean, default=False)
+    pre_cadastro_origem = Column(Boolean, default=False)
+    aprovado_em = Column(DateTime, nullable=True)
     premium_admin = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -210,6 +214,48 @@ class GympassSolicitacaoDB(Base):
     aluno = relationship("AlunoDB")
 
 
+class PreCadastroAlunoDB(Base):
+    __tablename__ = "pre_cadastros_alunos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String, nullable=False)
+    telefone = Column(String, nullable=True)
+    cpf = Column(String, unique=True, nullable=False, index=True)
+    status = Column(String, default="aguardando_aprovacao", index=True)
+    observacao = Column(Text, nullable=True)
+    criado_em = Column(DateTime, default=datetime.utcnow, index=True)
+    aprovado_em = Column(DateTime, nullable=True)
+    recusado_em = Column(DateTime, nullable=True)
+
+
+class PromocaoDB(Base):
+    __tablename__ = "promocoes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String, nullable=False)
+    tipo = Column(String, nullable=False)  # indicacao | novos_membros
+    descricao = Column(Text, nullable=True)
+    desconto_valor = Column(Float, default=0.0)
+    ativa = Column(Boolean, default=True, index=True)
+    observacao = Column(Text, nullable=True)
+    criado_em = Column(DateTime, default=datetime.utcnow, index=True)
+    atualizado_em = Column(DateTime, default=datetime.utcnow)
+
+
+class PromocaoAplicacaoDB(Base):
+    __tablename__ = "promocoes_aplicacoes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    promocao_id = Column(Integer, ForeignKey("promocoes.id"), nullable=False, index=True)
+    aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
+    valor_desconto = Column(Float, default=0.0)
+    observacao = Column(Text, nullable=True)
+    criado_em = Column(DateTime, default=datetime.utcnow, index=True)
+
+    promocao = relationship("PromocaoDB")
+    aluno = relationship("AlunoDB")
+
+
 def ensure_schema_updates():
     """
     Mantém o banco compatível com o app mesmo quando o PostgreSQL é recriado vazio
@@ -249,6 +295,10 @@ def ensure_schema_updates():
             "beneficio_ativo": "ALTER TABLE alunos ADD COLUMN beneficio_ativo BOOLEAN DEFAULT TRUE",
             "valor_padrao_plano": "ALTER TABLE alunos ADD COLUMN valor_padrao_plano FLOAT",
             "origem_valor": "ALTER TABLE alunos ADD COLUMN origem_valor VARCHAR(50)",
+            "valor_final_manual": "ALTER TABLE alunos ADD COLUMN valor_final_manual FLOAT",
+            "valor_final_manual_ativo": "ALTER TABLE alunos ADD COLUMN valor_final_manual_ativo BOOLEAN DEFAULT FALSE",
+            "pre_cadastro_origem": "ALTER TABLE alunos ADD COLUMN pre_cadastro_origem BOOLEAN DEFAULT FALSE",
+            "aprovado_em": "ALTER TABLE alunos ADD COLUMN aprovado_em TIMESTAMP",
             "premium_admin": "ALTER TABLE alunos ADD COLUMN premium_admin BOOLEAN DEFAULT FALSE",
             "gympass_acessos_dia": "ALTER TABLE alunos ADD COLUMN gympass_acessos_dia INTEGER DEFAULT 0",
             "created_at": "ALTER TABLE alunos ADD COLUMN created_at TIMESTAMP",
@@ -274,7 +324,7 @@ def ensure_schema_updates():
     # conflitos de índice em bancos antigos; criamos só o que estiver faltando.
     insp = inspect(engine)
     table_names = set(insp.get_table_names())
-    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB]:
+    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB, PreCadastroAlunoDB, PromocaoDB, PromocaoAplicacaoDB]:
         if model.__tablename__ not in table_names:
             try:
                 model.__table__.create(bind=engine, checkfirst=True)
@@ -496,6 +546,35 @@ class GympassResponderBody(BaseModel):
 class ReembolsoBody(BaseModel):
     observacao: Optional[str] = None
     usuario_admin: Optional[str] = None
+
+class PreCadastroCreate(BaseModel):
+    nome: str
+    telefone: Optional[str] = None
+    cpf: str
+
+class PreCadastroAprovarBody(BaseModel):
+    plano_nome: Optional[str] = "Mensal"
+    dias_plano: Optional[int] = 30
+    desconto_valor: Optional[float] = 0.0
+    valor_final_manual: Optional[float] = None
+    data_inicio_plano: Optional[str] = None
+    vencimento: Optional[str] = None
+    dia_vencimento_fixo: Optional[int] = None
+    premium_admin: Optional[bool] = False
+
+class PromocaoCreate(BaseModel):
+    nome: str
+    tipo: Literal["indicacao", "novos_membros"]
+    descricao: Optional[str] = None
+    desconto_valor: float = Field(0, ge=0)
+    ativa: Optional[bool] = True
+    aluno_indicou_id: Optional[int] = None
+    observacao: Optional[str] = None
+
+class ValorManualBody(BaseModel):
+    valor_final_manual: Optional[float] = Field(None, ge=0)
+    ativo: bool = True
+    observacao: Optional[str] = None
 
 # ----------------------
 # Helpers
@@ -739,6 +818,14 @@ def beneficio_ativo_aluno(aluno: AlunoDB) -> bool:
 
 def valor_cobrado_aluno(db, aluno: AlunoDB, plano_nome: Optional[str] = None) -> float:
     plano_ref = plano_nome or aluno.plano_nome
+
+    # Prioridade máxima: valor final manual definido pelo ADM.
+    # Isso garante que ADM, aluno, relatórios e checkout usem o mesmo valor.
+    if bool(getattr(aluno, "valor_final_manual_ativo", False)):
+        valor_manual = float(getattr(aluno, "valor_final_manual", 0) or 0)
+        if valor_manual >= 0:
+            return round(valor_manual, 2)
+
     valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, plano_ref)
     base = float(aluno.valor_plano or 0) or valor_padrao
 
@@ -818,6 +905,9 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "valor_personalizado": valor_personalizado if valor_personalizado > 0 else None,
         "beneficio_ativo": beneficio_ativo,
         "origem_valor": aluno.origem_valor,
+        "valor_final_manual": float(getattr(aluno, "valor_final_manual", 0) or 0) if getattr(aluno, "valor_final_manual", None) is not None else None,
+        "valor_final_manual_ativo": bool(getattr(aluno, "valor_final_manual_ativo", False)),
+        "pre_cadastro_origem": bool(getattr(aluno, "pre_cadastro_origem", False)),
         "desconto_percentual": desconto_percentual_real(db, aluno),
         "desconto_valor": desconto_valor_real(db, aluno),
         "valor_final": valor_final_aluno(db, aluno),
@@ -1566,10 +1656,31 @@ def listar_treinos(aluno_id: int):
             .order_by(TreinoDB.categoria.asc(), TreinoDB.id.desc())
             .all()
         )
+        if not treinos:
+            padrao = {
+                "A": ["Peito — supino reto 3x10", "Ombro — desenvolvimento 3x10", "Tríceps — corda 3x12"],
+                "B": ["Costas — puxada frontal 3x10", "Remada baixa 3x10", "Bíceps — rosca direta 3x12"],
+                "C": ["Pernas — agachamento 3x10", "Leg press 3x12", "Panturrilha 3x15"],
+                "D": ["Cardio leve 20 min", "Abdominal 3x15", "Mobilidade e alongamento"],
+            }
+            return [
+                {
+                    "id": 0,
+                    "categoria": k,
+                    "codigo": k,
+                    "titulo": f"Treino {k}",
+                    "descricao": "Treino padrão da academia.",
+                    "exercicios": "\n".join(v),
+                    "video_url": None,
+                    "padrao": True,
+                }
+                for k, v in padrao.items()
+            ]
         return [
             {
                 "id": t.id,
                 "categoria": t.categoria,
+                "codigo": t.categoria,
                 "titulo": t.titulo,
                 "descricao": t.descricao,
                 "exercicios": t.exercicios,
@@ -2779,7 +2890,190 @@ def retorno_pagamento_infinitepay(
         db.close()
 
 
+# ----------------------
+# Pré-cadastro / Sou novo aqui
+# ----------------------
+@app.post("/pre-cadastros")
+def criar_pre_cadastro(body: PreCadastroCreate):
+    db = SessionLocal()
+    try:
+        cpf = only_digits(body.cpf)
+        if len(cpf) != 11:
+            raise HTTPException(status_code=400, detail="CPF inválido")
+        if db.query(AlunoDB).filter(AlunoDB.cpf == cpf).first():
+            raise HTTPException(status_code=400, detail="CPF já cadastrado como aluno")
+        existente = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.cpf == cpf, PreCadastroAlunoDB.status == "aguardando_aprovacao").first()
+        if existente:
+            raise HTTPException(status_code=400, detail="Já existe um cadastro aguardando aprovação para este CPF")
+        item = PreCadastroAlunoDB(nome=body.nome.strip(), telefone=(body.telefone or "").strip(), cpf=cpf, status="aguardando_aprovacao")
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return {"ok": True, "mensagem": "Cadastro enviado com sucesso. Aguarde a academia validar seu acesso.", "id": item.id}
+    finally:
+        db.close()
+
+@app.get("/pre-cadastros")
+def listar_pre_cadastros(status: Optional[str] = Query(default="aguardando_aprovacao")):
+    db = SessionLocal()
+    try:
+        query = db.query(PreCadastroAlunoDB).order_by(PreCadastroAlunoDB.criado_em.desc())
+        if status:
+            query = query.filter(PreCadastroAlunoDB.status == status)
+        return [
+            {
+                "id": p.id, "nome": p.nome, "telefone": p.telefone, "cpf": p.cpf, "status": p.status,
+                "observacao": p.observacao, "criado_em": p.criado_em.isoformat() if p.criado_em else None,
+                "aprovado_em": p.aprovado_em.isoformat() if p.aprovado_em else None,
+                "recusado_em": p.recusado_em.isoformat() if p.recusado_em else None,
+            } for p in query.all()
+        ]
+    finally:
+        db.close()
+
+@app.post("/pre-cadastros/{pre_id}/aprovar")
+def aprovar_pre_cadastro(pre_id: int, body: PreCadastroAprovarBody):
+    db = SessionLocal()
+    try:
+        pre = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.id == pre_id).first()
+        if not pre:
+            raise HTTPException(status_code=404, detail="Pré-cadastro não encontrado")
+        if db.query(AlunoDB).filter(AlunoDB.cpf == pre.cpf).first():
+            raise HTTPException(status_code=400, detail="CPF já cadastrado como aluno")
+        plano = info_plano(db, (body.plano_nome or "Mensal").lower().replace("á", "a"), dias_override=body.dias_plano) if body.plano_nome else info_plano(db, "mensal")
+        vencimento = normalizar_data_texto(body.vencimento)
+        inicio = normalizar_data_texto(body.data_inicio_plano) or hoje_str()
+        dia_fixo = clamp_dia_vencimento(body.dia_vencimento_fixo) or (parse_date_safe(vencimento).day if parse_date_safe(vencimento) else parse_date_safe(inicio).day)
+        aluno = AlunoDB(
+            nome=pre.nome, telefone=pre.telefone, cpf=pre.cpf, plano_nome=plano["nome"],
+            valor_plano=float(plano["valor"]), valor_padrao_plano=float(plano["valor"]),
+            desconto_valor=max(float(body.desconto_valor or 0), 0.0),
+            valor_final_manual=float(body.valor_final_manual) if body.valor_final_manual is not None else None,
+            valor_final_manual_ativo=body.valor_final_manual is not None,
+            data_inicio_plano=inicio, vencimento=vencimento, dia_vencimento_fixo=dia_fixo,
+            premium_admin=bool(body.premium_admin), status_manual="em_dia" if body.premium_admin else "em_dia",
+            data_cadastro=agora_str(), status_cliente_raw="Ativo", status_contrato_raw="Ativo",
+            pre_cadastro_origem=True, aprovado_em=datetime.utcnow(), created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+        )
+        db.add(aluno)
+        pre.status = "aprovado"
+        pre.aprovado_em = datetime.utcnow()
+        db.commit()
+        db.refresh(aluno)
+        return {"ok": True, "aluno": aluno_dict(db, aluno)}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+@app.post("/pre-cadastros/{pre_id}/recusar")
+def recusar_pre_cadastro(pre_id: int, observacao: Optional[str] = Body(default=None, embed=True)):
+    db = SessionLocal()
+    try:
+        pre = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.id == pre_id).first()
+        if not pre:
+            raise HTTPException(status_code=404, detail="Pré-cadastro não encontrado")
+        pre.status = "recusado"
+        pre.observacao = observacao
+        pre.recusado_em = datetime.utcnow()
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+# ----------------------
+# Promoções e valor manual
+# ----------------------
+@app.get("/promocoes")
+def listar_promocoes():
+    db = SessionLocal()
+    try:
+        promocoes = db.query(PromocaoDB).order_by(PromocaoDB.criado_em.desc()).all()
+        saida = []
+        for p in promocoes:
+            aplicacoes = db.query(PromocaoAplicacaoDB).filter(PromocaoAplicacaoDB.promocao_id == p.id).all()
+            saida.append({
+                "id": p.id, "nome": p.nome, "tipo": p.tipo, "descricao": p.descricao,
+                "desconto_valor": p.desconto_valor, "ativa": p.ativa, "observacao": p.observacao,
+                "criado_em": p.criado_em.isoformat() if p.criado_em else None,
+                "alunos_vinculados": [
+                    {"aluno_id": a.aluno_id, "nome": a.aluno.nome if a.aluno else None, "valor_desconto": a.valor_desconto, "criado_em": a.criado_em.isoformat() if a.criado_em else None}
+                    for a in aplicacoes
+                ]
+            })
+        return saida
+    finally:
+        db.close()
+
+@app.post("/promocoes")
+def criar_promocao(body: PromocaoCreate):
+    db = SessionLocal()
+    try:
+        promo = PromocaoDB(
+            nome=body.nome.strip(), tipo=body.tipo, descricao=(body.descricao or "").strip() or None,
+            desconto_valor=max(float(body.desconto_valor or 0), 0.0), ativa=bool(body.ativa), observacao=body.observacao,
+        )
+        db.add(promo)
+        db.flush()
+        if body.tipo == "indicacao" and body.aluno_indicou_id:
+            aluno = buscar_aluno_por_id(db, body.aluno_indicou_id)
+            if not aluno:
+                raise HTTPException(status_code=404, detail="Aluno indicador não encontrado")
+            desconto_atual = float(getattr(aluno, "desconto_valor", 0) or 0)
+            novo_desconto = desconto_atual + promo.desconto_valor
+            base = float(aluno.valor_plano or 0) or valor_base_plano_nome(db, aluno.plano_nome)
+            aluno.desconto_valor = round(min(novo_desconto, max(base, 0.0)), 2)
+            aluno.origem_valor = "promocao_indicacao"
+            aluno.updated_at = datetime.utcnow()
+            db.add(PromocaoAplicacaoDB(promocao_id=promo.id, aluno_id=aluno.id, valor_desconto=promo.desconto_valor, observacao="Desconto por indicação aplicado automaticamente"))
+        db.commit()
+        db.refresh(promo)
+        return {"ok": True, "promocao_id": promo.id}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+@app.put("/promocoes/{promocao_id}/status")
+def alterar_status_promocao(promocao_id: int, ativa: bool = Body(..., embed=True)):
+    db = SessionLocal()
+    try:
+        promo = db.query(PromocaoDB).filter(PromocaoDB.id == promocao_id).first()
+        if not promo:
+            raise HTTPException(status_code=404, detail="Promoção não encontrada")
+        promo.ativa = bool(ativa)
+        promo.atualizado_em = datetime.utcnow()
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+@app.put("/alunos/{aluno_id}/valor-manual")
+def atualizar_valor_manual(aluno_id: int, body: ValorManualBody):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        if not body.ativo or body.valor_final_manual is None:
+            aluno.valor_final_manual = None
+            aluno.valor_final_manual_ativo = False
+            aluno.origem_valor = "valor_manual_removido"
+        else:
+            aluno.valor_final_manual = round(max(float(body.valor_final_manual), 0.0), 2)
+            aluno.valor_final_manual_ativo = True
+            aluno.origem_valor = "valor_final_manual_admin"
+        aluno.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(aluno)
+        return aluno_dict(db, aluno)
+    finally:
+        db.close()
+
+
 @app.post("/pagamentos/{pagamento_id}/aprovar-demo")
 def aprovar_pagamento_demo(pagamento_id: int):
     return {"ok": True, "mensagem": "Modo demo desativado. Use o link real para pagar."}
-# deploy render atualizado v5.0.5
+# deploy render atualizado v5.1.2
