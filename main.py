@@ -29,7 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.1.2"
+APP_VERSION = "5.1.3"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -569,6 +569,14 @@ class PromocaoCreate(BaseModel):
     desconto_valor: float = Field(0, ge=0)
     ativa: Optional[bool] = True
     aluno_indicou_id: Optional[int] = None
+    observacao: Optional[str] = None
+
+class PromocaoUpdate(BaseModel):
+    nome: Optional[str] = None
+    tipo: Optional[Literal["indicacao", "novos_membros"]] = None
+    descricao: Optional[str] = None
+    desconto_valor: Optional[float] = Field(None, ge=0)
+    ativa: Optional[bool] = None
     observacao: Optional[str] = None
 
 class ValorManualBody(BaseModel):
@@ -3030,6 +3038,55 @@ def criar_promocao(body: PromocaoCreate):
         db.commit()
         db.refresh(promo)
         return {"ok": True, "promocao_id": promo.id}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+@app.put("/promocoes/{promocao_id}")
+def atualizar_promocao(promocao_id: int, body: PromocaoUpdate):
+    db = SessionLocal()
+    try:
+        promo = db.query(PromocaoDB).filter(PromocaoDB.id == promocao_id).first()
+        if not promo:
+            raise HTTPException(status_code=404, detail="Promoção não encontrada")
+        if body.nome is not None:
+            nome = body.nome.strip()
+            if not nome:
+                raise HTTPException(status_code=400, detail="Nome da promoção é obrigatório")
+            promo.nome = nome
+        if body.tipo is not None:
+            promo.tipo = body.tipo
+        if body.descricao is not None:
+            promo.descricao = body.descricao.strip() or None
+        if body.desconto_valor is not None:
+            promo.desconto_valor = round(max(float(body.desconto_valor or 0), 0.0), 2)
+        if body.ativa is not None:
+            promo.ativa = bool(body.ativa)
+        if body.observacao is not None:
+            promo.observacao = body.observacao.strip() or None
+        promo.atualizado_em = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "promocao_id": promo.id}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+@app.delete("/promocoes/{promocao_id}")
+def excluir_promocao(promocao_id: int):
+    db = SessionLocal()
+    try:
+        promo = db.query(PromocaoDB).filter(PromocaoDB.id == promocao_id).first()
+        if not promo:
+            raise HTTPException(status_code=404, detail="Promoção não encontrada")
+        # Não desfaz descontos já aplicados em alunos, para não alterar valores combinados sem conferência.
+        db.query(PromocaoAplicacaoDB).filter(PromocaoAplicacaoDB.promocao_id == promocao_id).delete(synchronize_session=False)
+        db.delete(promo)
+        db.commit()
+        return {"ok": True, "mensagem": "Promoção excluída. Descontos já aplicados em alunos foram preservados."}
     except Exception:
         db.rollback()
         raise
