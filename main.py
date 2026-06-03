@@ -30,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.1.6"
+APP_VERSION = "5.1.8"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -1644,9 +1644,20 @@ def excluir_aviso(aviso_id: int):
         aviso = db.query(AvisoDB).filter(AvisoDB.id == aviso_id).first()
         if not aviso:
             raise HTTPException(status_code=404, detail="Aviso não encontrado")
+
+        # Primeiro apaga as leituras vinculadas ao aviso.
+        # Sem isso o PostgreSQL pode bloquear a exclusão por causa da FK
+        # avisos_leituras.aviso_id -> avisos.id.
+        db.query(AvisoLeituraDB).filter(AvisoLeituraDB.aviso_id == aviso_id).delete(synchronize_session=False)
         db.delete(aviso)
         db.commit()
-        return {"ok": True, "message": "Aviso excluído"}
+        return {"ok": True, "message": "Aviso excluído com sucesso"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        return JSONResponse(status_code=500, content={"ok": False, "error": f"Erro ao excluir aviso: {str(e)}"})
     finally:
         db.close()
 
@@ -2608,9 +2619,20 @@ def excluir_aviso(aviso_id: int):
         aviso = db.query(AvisoDB).filter(AvisoDB.id == aviso_id).first()
         if not aviso:
             raise HTTPException(status_code=404, detail="Aviso não encontrado")
+
+        # Primeiro apaga as leituras vinculadas ao aviso.
+        # Sem isso o PostgreSQL pode bloquear a exclusão por causa da FK
+        # avisos_leituras.aviso_id -> avisos.id.
+        db.query(AvisoLeituraDB).filter(AvisoLeituraDB.aviso_id == aviso_id).delete(synchronize_session=False)
         db.delete(aviso)
         db.commit()
-        return {"ok": True, "message": "Aviso excluído"}
+        return {"ok": True, "message": "Aviso excluído com sucesso"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        return JSONResponse(status_code=500, content={"ok": False, "error": f"Erro ao excluir aviso: {str(e)}"})
     finally:
         db.close()
 
