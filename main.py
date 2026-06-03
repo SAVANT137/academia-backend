@@ -25,11 +25,12 @@ from sqlalchemy import (
     create_engine,
     inspect,
     text,
+    or_,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.1.3"
+APP_VERSION = "5.1.6"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -110,6 +111,9 @@ class AlunoDB(Base):
     pre_cadastro_origem = Column(Boolean, default=False)
     aprovado_em = Column(DateTime, nullable=True)
     premium_admin = Column(Boolean, default=False)
+    deletado = Column(Boolean, default=False)
+    deletado_em = Column(DateTime, nullable=True)
+    cpf_original = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
@@ -301,6 +305,9 @@ def ensure_schema_updates():
             "aprovado_em": "ALTER TABLE alunos ADD COLUMN aprovado_em TIMESTAMP",
             "premium_admin": "ALTER TABLE alunos ADD COLUMN premium_admin BOOLEAN DEFAULT FALSE",
             "gympass_acessos_dia": "ALTER TABLE alunos ADD COLUMN gympass_acessos_dia INTEGER DEFAULT 0",
+            "deletado": "ALTER TABLE alunos ADD COLUMN deletado BOOLEAN DEFAULT FALSE",
+            "deletado_em": "ALTER TABLE alunos ADD COLUMN deletado_em TIMESTAMP",
+            "cpf_original": "ALTER TABLE alunos ADD COLUMN cpf_original VARCHAR(50)",
             "created_at": "ALTER TABLE alunos ADD COLUMN created_at TIMESTAMP",
             "updated_at": "ALTER TABLE alunos ADD COLUMN updated_at TIMESTAMP",
         }
@@ -716,6 +723,18 @@ def dias_atraso(vencimento: Optional[str]) -> int:
         return 0
     return (hoje() - venc).days
 
+def juros_atraso_aluno(aluno: AlunoDB) -> float:
+    """Juros simples por atraso: R$ 1,00 por dia vencido, limitado a R$ 5,00.
+    Não altera o plano nem o desconto do aluno; só entra no valor cobrado enquanto estiver atrasado.
+    """
+    if aluno_premium_admin(aluno):
+        return 0.0
+    plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
+    if "gympass" in plano:
+        return 0.0
+    dias = max(0, dias_atraso(getattr(aluno, "vencimento", None)))
+    return round(min(dias, 5) * 1.0, 2)
+
 def aluno_premium_admin(aluno: AlunoDB) -> bool:
     return bool(getattr(aluno, "premium_admin", False))
 
@@ -798,11 +817,20 @@ def qrcode_base64(valor: str) -> str:
     encoded = base64.b64encode(buffer.read()).decode("utf-8")
     return f"data:image/png;base64,{encoded}"
 
-def buscar_aluno_por_id(db, aluno_id: int) -> Optional[AlunoDB]:
-    return db.query(AlunoDB).filter(AlunoDB.id == aluno_id).first()
+def buscar_aluno_por_id(db, aluno_id: int, incluir_deletados: bool = False) -> Optional[AlunoDB]:
+    q = db.query(AlunoDB).filter(AlunoDB.id == aluno_id)
+    if not incluir_deletados:
+        q = q.filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None)))
+    return q.first()
 
-def buscar_aluno_por_cpf(db, cpf: str) -> Optional[AlunoDB]:
-    return db.query(AlunoDB).filter(AlunoDB.cpf == only_digits(cpf)).first()
+def buscar_aluno_por_cpf(db, cpf: str, incluir_deletados: bool = False) -> Optional[AlunoDB]:
+    cpf_limpo = only_digits(cpf)
+    if not cpf_limpo:
+        return None
+    q = db.query(AlunoDB)
+    if not incluir_deletados:
+        q = q.filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None)))
+    return q.filter(AlunoDB.cpf == cpf_limpo).first()
 
 
 def valor_base_plano_nome(db, plano_nome: Optional[str]) -> float:
@@ -826,13 +854,14 @@ def beneficio_ativo_aluno(aluno: AlunoDB) -> bool:
 
 def valor_cobrado_aluno(db, aluno: AlunoDB, plano_nome: Optional[str] = None) -> float:
     plano_ref = plano_nome or aluno.plano_nome
+    juros = juros_atraso_aluno(aluno)
 
     # Prioridade máxima: valor final manual definido pelo ADM.
     # Isso garante que ADM, aluno, relatórios e checkout usem o mesmo valor.
     if bool(getattr(aluno, "valor_final_manual_ativo", False)):
         valor_manual = float(getattr(aluno, "valor_final_manual", 0) or 0)
         if valor_manual >= 0:
-            return round(valor_manual, 2)
+            return round(valor_manual + juros, 2)
 
     valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, plano_ref)
     base = float(aluno.valor_plano or 0) or valor_padrao
@@ -840,17 +869,17 @@ def valor_cobrado_aluno(db, aluno: AlunoDB, plano_nome: Optional[str] = None) ->
     # Novo padrão: desconto em reais.
     desconto_reais = float(getattr(aluno, "desconto_valor", 0) or 0)
     if desconto_reais > 0:
-        return round(max(base - desconto_reais, 0.0), 2)
+        return round(max(base - desconto_reais, 0.0) + juros, 2)
 
     # Compatibilidade com alunos antigos que já tinham valor final personalizado.
     valor_personalizado = float(aluno.valor_personalizado or 0)
     if beneficio_ativo_aluno(aluno) and valor_personalizado > 0:
-        return round(valor_personalizado, 2)
+        return round(valor_personalizado + juros, 2)
 
     # Compatibilidade com versões antigas que gravavam percentual.
     desconto = float(aluno.desconto_percentual or 0)
     desconto = max(0.0, min(100.0, desconto))
-    return round(max(base * (1 - desconto / 100.0), 0.0), 2)
+    return round(max(base * (1 - desconto / 100.0), 0.0) + juros, 2)
 
 
 def desconto_percentual_real(db, aluno: AlunoDB, plano_nome: Optional[str] = None) -> float:
@@ -919,6 +948,7 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "desconto_percentual": desconto_percentual_real(db, aluno),
         "desconto_valor": desconto_valor_real(db, aluno),
         "valor_final": valor_final_aluno(db, aluno),
+        "juros_atraso": juros_atraso_aluno(aluno),
         "vencimento": aluno.vencimento,
         "data_inicio_plano": getattr(aluno, "data_inicio_plano", None),
         "dia_vencimento_fixo": getattr(aluno, "dia_vencimento_fixo", None),
@@ -1192,7 +1222,7 @@ def listar_alunos(
 ):
     db = SessionLocal()
     try:
-        alunos = db.query(AlunoDB).order_by(AlunoDB.nome.asc()).all()
+        alunos = db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()
         resultado = [aluno_dict(db, a) for a in alunos]
 
         if status:
@@ -1373,14 +1403,40 @@ def atualizar_foto_aluno(aluno_id: int, body: FotoAlunoBody):
 
 @app.delete("/alunos/{aluno_id}")
 def excluir_aluno(aluno_id: int):
+    """
+    Exclusão segura do aluno.
+
+    Não apagamos fisicamente a linha porque existem pagamentos, acessos, avisos,
+    treinos e solicitações Gympass ligados ao aluno por chave estrangeira.
+    Apagar direto causa erro no PostgreSQL e também destruiria histórico.
+
+    A solução é marcar como deletado, esconder das listas/login e liberar o CPF
+    para um novo cadastro futuro.
+    """
     db = SessionLocal()
     try:
-        aluno = buscar_aluno_por_id(db, aluno_id)
-        if not aluno:
+        aluno = buscar_aluno_por_id(db, aluno_id, incluir_deletados=True)
+        if not aluno or bool(getattr(aluno, "deletado", False)):
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        db.delete(aluno)
+
+        cpf_atual = only_digits(aluno.cpf or "")
+        aluno.cpf_original = cpf_atual or aluno.cpf
+        aluno.cpf = f"excluido_{aluno.id}_{cpf_atual or 'semcpf'}"
+        aluno.nome = f"{aluno.nome} (excluído)"
+        aluno.status_manual = "inativo"
+        aluno.status_cliente_raw = "Excluído pelo ADM"
+        aluno.status_contrato_raw = "excluido"
+        aluno.deletado = True
+        aluno.deletado_em = datetime.utcnow()
+        aluno.updated_at = datetime.utcnow()
         db.commit()
-        return {"ok": True, "message": "Aluno excluído"}
+        return {"ok": True, "message": "Aluno removido da lista com segurança"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao remover aluno: {e}")
     finally:
         db.close()
 
@@ -2299,7 +2355,7 @@ def reembolsar_ultimo_pagamento(aluno_id: int, body: ReembolsoBody = Body(defaul
 def relatorio_resumo():
     db = SessionLocal()
     try:
-        alunos = db.query(AlunoDB).all()
+        alunos = db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).all()
         lista = [aluno_dict(db, a) for a in alunos]
 
         em_dia = [a for a in lista if a["status"] == "em_dia"]
@@ -2326,7 +2382,7 @@ def relatorio_resumo():
 def relatorio_texto(tipo: Literal["ativos", "atrasados", "inativos"]):
     db = SessionLocal()
     try:
-        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).order_by(AlunoDB.nome.asc()).all()]
+        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()]
         mapa = {
             "ativos": "em_dia",
             "atrasados": "atrasado",
@@ -2404,7 +2460,7 @@ def atualizar_promocional_alias(valor: float = Query(...), dias: int = Query(PRO
 def relatorio_texto_completo():
     db = SessionLocal()
     try:
-        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).order_by(AlunoDB.nome.asc()).all()]
+        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()]
         pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
 
         em_dia = [a for a in alunos if a["status"] == "em_dia"]
@@ -2490,7 +2546,7 @@ def aluno_login(cpf: str):
 def relatorio_planos():
     db = SessionLocal()
     try:
-        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).all()]
+        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).all()]
         nomes = ["Mensal", "Semestral", "Anual", "Promocional", "Diária", "Gympass"]
         contagem = {n: 0 for n in nomes}
         for a in alunos:
@@ -2908,7 +2964,7 @@ def criar_pre_cadastro(body: PreCadastroCreate):
         cpf = only_digits(body.cpf)
         if len(cpf) != 11:
             raise HTTPException(status_code=400, detail="CPF inválido")
-        if db.query(AlunoDB).filter(AlunoDB.cpf == cpf).first():
+        if db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None)), AlunoDB.cpf == cpf).first():
             raise HTTPException(status_code=400, detail="CPF já cadastrado como aluno")
         existente = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.cpf == cpf, PreCadastroAlunoDB.status == "aguardando_aprovacao").first()
         if existente:
@@ -2946,7 +3002,7 @@ def aprovar_pre_cadastro(pre_id: int, body: PreCadastroAprovarBody):
         pre = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.id == pre_id).first()
         if not pre:
             raise HTTPException(status_code=404, detail="Pré-cadastro não encontrado")
-        if db.query(AlunoDB).filter(AlunoDB.cpf == pre.cpf).first():
+        if db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None)), AlunoDB.cpf == pre.cpf).first():
             raise HTTPException(status_code=400, detail="CPF já cadastrado como aluno")
         plano = info_plano(db, (body.plano_nome or "Mensal").lower().replace("á", "a"), dias_override=body.dias_plano) if body.plano_nome else info_plano(db, "mensal")
         vencimento = normalizar_data_texto(body.vencimento)
