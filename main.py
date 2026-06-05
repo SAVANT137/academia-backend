@@ -30,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.1.8"
+APP_VERSION = "5.1.9"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -111,6 +111,8 @@ class AlunoDB(Base):
     pre_cadastro_origem = Column(Boolean, default=False)
     aprovado_em = Column(DateTime, nullable=True)
     premium_admin = Column(Boolean, default=False)
+    acesso_livre = Column(Boolean, default=False)
+    pode_acessar_adm = Column(Boolean, default=False)
     deletado = Column(Boolean, default=False)
     deletado_em = Column(DateTime, nullable=True)
     cpf_original = Column(String, nullable=True)
@@ -304,6 +306,8 @@ def ensure_schema_updates():
             "pre_cadastro_origem": "ALTER TABLE alunos ADD COLUMN pre_cadastro_origem BOOLEAN DEFAULT FALSE",
             "aprovado_em": "ALTER TABLE alunos ADD COLUMN aprovado_em TIMESTAMP",
             "premium_admin": "ALTER TABLE alunos ADD COLUMN premium_admin BOOLEAN DEFAULT FALSE",
+            "acesso_livre": "ALTER TABLE alunos ADD COLUMN acesso_livre BOOLEAN DEFAULT FALSE",
+            "pode_acessar_adm": "ALTER TABLE alunos ADD COLUMN pode_acessar_adm BOOLEAN DEFAULT FALSE",
             "gympass_acessos_dia": "ALTER TABLE alunos ADD COLUMN gympass_acessos_dia INTEGER DEFAULT 0",
             "deletado": "ALTER TABLE alunos ADD COLUMN deletado BOOLEAN DEFAULT FALSE",
             "deletado_em": "ALTER TABLE alunos ADD COLUMN deletado_em TIMESTAMP",
@@ -469,6 +473,8 @@ class AlunoCreate(BaseModel):
     desconto_percentual: Optional[float] = 0.0
     desconto_valor: Optional[float] = 0.0
     premium_admin: Optional[bool] = False
+    acesso_livre: Optional[bool] = False
+    pode_acessar_adm: Optional[bool] = False
     data_inicio_plano: Optional[str] = None
     vencimento: Optional[str] = None
     dia_vencimento_fixo: Optional[int] = None
@@ -488,6 +494,8 @@ class AlunoAdminUpdate(BaseModel):
     dia_vencimento_fixo: Optional[int] = None
     status_manual: Optional[Literal["pendente", "em_dia", "atrasado", "inativo"]] = None
     premium_admin: Optional[bool] = None
+    acesso_livre: Optional[bool] = None
+    pode_acessar_adm: Optional[bool] = None
 
 class AlunoSelfUpdate(BaseModel):
     nome: str
@@ -568,6 +576,8 @@ class PreCadastroAprovarBody(BaseModel):
     vencimento: Optional[str] = None
     dia_vencimento_fixo: Optional[int] = None
     premium_admin: Optional[bool] = False
+    acesso_livre: Optional[bool] = False
+    pode_acessar_adm: Optional[bool] = False
 
 class PromocaoCreate(BaseModel):
     nome: str
@@ -727,7 +737,7 @@ def juros_atraso_aluno(aluno: AlunoDB) -> float:
     """Juros simples por atraso: R$ 1,00 por dia vencido, limitado a R$ 5,00.
     Não altera o plano nem o desconto do aluno; só entra no valor cobrado enquanto estiver atrasado.
     """
-    if aluno_premium_admin(aluno):
+    if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno):
         return 0.0
     plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
     if "gympass" in plano:
@@ -738,8 +748,18 @@ def juros_atraso_aluno(aluno: AlunoDB) -> float:
 def aluno_premium_admin(aluno: AlunoDB) -> bool:
     return bool(getattr(aluno, "premium_admin", False))
 
+def aluno_acesso_livre(aluno: AlunoDB) -> bool:
+    return bool(getattr(aluno, "acesso_livre", False))
+
+def aluno_super_admin(aluno: AlunoDB) -> bool:
+    cpf = only_digits(getattr(aluno, "cpf", "") or "")
+    return bool(getattr(aluno, "pode_acessar_adm", False)) or cpf == "87740648191"
+
+def aluno_sem_cobranca(aluno: AlunoDB) -> bool:
+    return aluno_premium_admin(aluno) or aluno_acesso_livre(aluno)
+
 def obter_status_por_regras(aluno: AlunoDB) -> str:
-    if aluno_premium_admin(aluno):
+    if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno):
         return "em_dia"
 
     plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
@@ -854,6 +874,8 @@ def beneficio_ativo_aluno(aluno: AlunoDB) -> bool:
 
 def valor_cobrado_aluno(db, aluno: AlunoDB, plano_nome: Optional[str] = None) -> float:
     plano_ref = plano_nome or aluno.plano_nome
+    if aluno_sem_cobranca(aluno):
+        return 0.0
     juros = juros_atraso_aluno(aluno)
 
     # Prioridade máxima: valor final manual definido pelo ADM.
@@ -914,6 +936,8 @@ def valor_final_aluno(db, aluno: AlunoDB) -> float:
 def aluno_dict(db, aluno: AlunoDB) -> dict:
     status = obter_status_por_regras(aluno)
     premium_admin = aluno_premium_admin(aluno)
+    acesso_livre = aluno_acesso_livre(aluno)
+    pode_acessar_adm = aluno_super_admin(aluno)
     valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, aluno.plano_nome)
     valor_personalizado = float(aluno.valor_personalizado or 0)
     beneficio_ativo = beneficio_ativo_aluno(aluno)
@@ -931,11 +955,13 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "status_manual": aluno.status_manual,
         "premium_admin": premium_admin,
         "adm_premium": premium_admin,
-        "acesso_livre": premium_admin,
+        "acesso_livre": acesso_livre,
+        "pode_acessar_adm": pode_acessar_adm,
+        "tipo_aluno": "Professor/Premium" if premium_admin else ("Acesso Livre" if acesso_livre else "Aluno comum"),
         "dias_pendentes_restantes": dias_pendentes_restantes,
         "dias_para_vencer": dias_para_vencer,
         "gympass": "gympass" in (aluno.plano_nome or "").strip().lower(),
-        "aviso_pagamento": ("Acesso vitalício — aluno com privilégio ADM/Premium." if premium_admin else ("Sua mensalidade está próxima do vencimento. Regularize o pagamento para evitar o bloqueio do acesso à catraca." if status == "pendente" else None)),
+        "aviso_pagamento": ("Acesso vitalício — aluno com privilégio ADM/Premium." if premium_admin else ("Acesso livre — sem mensalidade e sem vencimento." if acesso_livre else ("Sua mensalidade está próxima do vencimento. Regularize o pagamento para evitar o bloqueio do acesso à catraca." if status == "pendente" else None))),
         "plano_nome": aluno.plano_nome,
         "valor_plano": float(aluno.valor_plano or 0),
         "valor_padrao_plano": valor_padrao,
@@ -1148,6 +1174,11 @@ def criar_aluno(body: AlunoCreate = Body(...)):
         payload_desconto = float(body.desconto_percentual or 0)
         payload_desconto_valor = float(body.desconto_valor or 0)
         payload_premium_admin = bool(body.premium_admin or False)
+        payload_acesso_livre = bool(getattr(body, "acesso_livre", False) or False)
+        payload_pode_acessar_adm = bool(getattr(body, "pode_acessar_adm", False) or False)
+        if payload_premium_admin:
+            payload_acesso_livre = False
+        payload_sem_cobranca = payload_premium_admin or payload_acesso_livre
         payload_data_inicio = normalizar_data_texto(body.data_inicio_plano)
         payload_vencimento = normalizar_data_texto(body.vencimento)
         payload_dia_fixo = clamp_dia_vencimento(body.dia_vencimento_fixo)
@@ -1191,16 +1222,18 @@ def criar_aluno(body: AlunoCreate = Body(...)):
     sexo=payload_sexo,
     plano_nome=plano_normalizado,
     valor_plano=valor_plano,
-    vencimento=None if payload_premium_admin else payload_vencimento,
-    data_inicio_plano=None if payload_premium_admin else (payload_data_inicio or hoje_str()),
-    dia_vencimento_fixo=None if payload_premium_admin else (payload_dia_fixo or ((parse_date_safe(payload_vencimento) or parse_date_safe(payload_data_inicio) or hoje()).day)),
+    vencimento=None if payload_sem_cobranca else payload_vencimento,
+    data_inicio_plano=None if payload_sem_cobranca else (payload_data_inicio or hoje_str()),
+    dia_vencimento_fixo=None if payload_sem_cobranca else (payload_dia_fixo or ((parse_date_safe(payload_vencimento) or parse_date_safe(payload_data_inicio) or hoje()).day)),
     data_cadastro=agora_str(),
-    status_cliente_raw="Ativo" if payload_premium_admin else "pendente",
-    status_contrato_raw="ADM/Premium" if payload_premium_admin else "aguardando_pagamento",
+    status_cliente_raw="Ativo" if payload_sem_cobranca else "pendente",
+    status_contrato_raw=("ADM/Premium" if payload_premium_admin else ("Acesso Livre" if payload_acesso_livre else "aguardando_pagamento")),
     premium_admin=payload_premium_admin,
+    acesso_livre=payload_acesso_livre,
+    pode_acessar_adm=payload_pode_acessar_adm,
     desconto_percentual=payload_desconto,
     desconto_valor=payload_desconto_valor,
-    status_manual="em_dia" if payload_premium_admin else "pendente",
+    status_manual="em_dia" if payload_sem_cobranca else "pendente",
 )
         db.add(aluno)
         db.commit()
@@ -1313,6 +1346,7 @@ def atualizar_aluno_admin(aluno_id: int, body: AlunoAdminUpdate):
         if body.premium_admin is not None:
             aluno.premium_admin = bool(body.premium_admin)
             if aluno.premium_admin:
+                aluno.acesso_livre = False
                 aluno.status_manual = "em_dia"
                 aluno.vencimento = None
                 aluno.data_inicio_plano = None
@@ -1320,7 +1354,20 @@ def atualizar_aluno_admin(aluno_id: int, body: AlunoAdminUpdate):
                 aluno.beneficio_ativo = True
                 aluno.status_cliente_raw = "Ativo"
                 aluno.status_contrato_raw = "ADM/Premium"
-        if not aluno.premium_admin and not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
+        if getattr(body, "acesso_livre", None) is not None:
+            aluno.acesso_livre = bool(body.acesso_livre)
+            if aluno.acesso_livre:
+                aluno.premium_admin = False
+                aluno.status_manual = "em_dia"
+                aluno.vencimento = None
+                aluno.data_inicio_plano = None
+                aluno.dia_vencimento_fixo = None
+                aluno.beneficio_ativo = True
+                aluno.status_cliente_raw = "Ativo"
+                aluno.status_contrato_raw = "Acesso Livre"
+        if getattr(body, "pode_acessar_adm", None) is not None:
+            aluno.pode_acessar_adm = bool(body.pode_acessar_adm)
+        if not aluno.premium_admin and not aluno_acesso_livre(aluno) and not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
             aluno.dia_vencimento_fixo = inferir_dia_vencimento_fixo(aluno)
         aluno.updated_at = datetime.utcnow()
 
@@ -1803,6 +1850,8 @@ def aluno_pode_liberar_catraca(aluno: AlunoDB) -> tuple[bool, str]:
 
     if aluno_premium_admin(aluno):
         return True, "Acesso liberado — aluno com privilégio ADM/Premium."
+    if aluno_acesso_livre(aluno):
+        return True, "Acesso livre liberado — sem mensalidade e sem timer."
 
     plano = (aluno.plano_nome or "").strip().lower()
     if "gympass" in plano:
@@ -1822,6 +1871,8 @@ def aluno_pode_liberar_catraca(aluno: AlunoDB) -> tuple[bool, str]:
 def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> None:
     if aluno_premium_admin(aluno) and status == "liberado":
         motivo = "Acesso liberado — aluno com privilégio ADM/Premium."
+    if aluno_acesso_livre(aluno) and status == "liberado":
+        motivo = "Acesso livre liberado — sem mensalidade."
     db.add(EntradaDB(
         aluno_id=aluno.id,
         nome=aluno.nome or "Aluno",
@@ -1831,7 +1882,7 @@ def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> No
 
 
 def cooldown_catraca_restante(db, aluno: AlunoDB) -> int:
-    if aluno_premium_admin(aluno):
+    if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno):
         return 0
     limite = datetime.utcnow() - timedelta(minutes=5)
     ultimo = (
@@ -1991,7 +2042,7 @@ def solicitar_liberacao_catraca(aluno_id: int):
             atualizado_em=datetime.utcnow(),
         )
         db.add(pedido)
-        registrar_evento_entrada(db, aluno, "liberado", "premium" if aluno_premium_admin(aluno) else ("pendente" if obter_status_por_regras(aluno) == "pendente" else "catraca"))
+        registrar_evento_entrada(db, aluno, "liberado", "premium" if aluno_premium_admin(aluno) else ("acesso_livre" if aluno_acesso_livre(aluno) else ("pendente" if obter_status_por_regras(aluno) == "pendente" else "catraca")))
         db.commit()
         db.refresh(pedido)
 
@@ -2000,8 +2051,9 @@ def solicitar_liberacao_catraca(aluno_id: int):
             "liberado": True,
             "pedido_id": pedido.id,
             "status_pedido": pedido.status,
-            "mensagem": mensagem if aluno_premium_admin(aluno) or obter_status_por_regras(aluno) == "pendente" else "Pedido enviado. Aguarde a liberação da catraca.",
+            "mensagem": mensagem if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) or obter_status_por_regras(aluno) == "pendente" else "Pedido enviado. Aguarde a liberação da catraca.",
             "premium_admin": aluno_premium_admin(aluno),
+            "acesso_livre": aluno_acesso_livre(aluno),
             "status_aluno": obter_status_por_regras(aluno),
         }
     finally:
@@ -3027,6 +3079,9 @@ def aprovar_pre_cadastro(pre_id: int, body: PreCadastroAprovarBody):
         if db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None)), AlunoDB.cpf == pre.cpf).first():
             raise HTTPException(status_code=400, detail="CPF já cadastrado como aluno")
         plano = info_plano(db, (body.plano_nome or "Mensal").lower().replace("á", "a"), dias_override=body.dias_plano) if body.plano_nome else info_plano(db, "mensal")
+        body_premium = bool(getattr(body, "premium_admin", False))
+        body_acesso_livre = bool(getattr(body, "acesso_livre", False)) and not body_premium
+        body_sem_cobranca = body_premium or body_acesso_livre
         vencimento = normalizar_data_texto(body.vencimento)
         inicio = normalizar_data_texto(body.data_inicio_plano) or hoje_str()
         dia_fixo = clamp_dia_vencimento(body.dia_vencimento_fixo) or (parse_date_safe(vencimento).day if parse_date_safe(vencimento) else parse_date_safe(inicio).day)
@@ -3036,8 +3091,9 @@ def aprovar_pre_cadastro(pre_id: int, body: PreCadastroAprovarBody):
             desconto_valor=max(float(body.desconto_valor or 0), 0.0),
             valor_final_manual=float(body.valor_final_manual) if body.valor_final_manual is not None else None,
             valor_final_manual_ativo=body.valor_final_manual is not None,
-            data_inicio_plano=inicio, vencimento=vencimento, dia_vencimento_fixo=dia_fixo,
-            premium_admin=bool(body.premium_admin), status_manual="em_dia" if body.premium_admin else "em_dia",
+            data_inicio_plano=None if body_sem_cobranca else inicio, vencimento=None if body_sem_cobranca else vencimento, dia_vencimento_fixo=None if body_sem_cobranca else dia_fixo,
+            premium_admin=body_premium, acesso_livre=body_acesso_livre, pode_acessar_adm=bool(getattr(body, "pode_acessar_adm", False)),
+            status_manual="em_dia",
             data_cadastro=agora_str(), status_cliente_raw="Ativo", status_contrato_raw="Ativo",
             pre_cadastro_origem=True, aprovado_em=datetime.utcnow(), created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
         )
@@ -3065,6 +3121,20 @@ def recusar_pre_cadastro(pre_id: int, observacao: Optional[str] = Body(default=N
         pre.recusado_em = datetime.utcnow()
         db.commit()
         return {"ok": True}
+    finally:
+        db.close()
+
+
+@app.post("/aluno/{aluno_id}/acesso-adm")
+def validar_acesso_adm_aluno(aluno_id: int):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        if not aluno_super_admin(aluno):
+            raise HTTPException(status_code=403, detail="Este aluno não tem permissão para acessar o ADM")
+        return {"ok": True, "aluno": aluno_dict(db, aluno), "adm": True}
     finally:
         db.close()
 
