@@ -30,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.1.9"
+APP_VERSION = "5.2.0"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -113,6 +113,10 @@ class AlunoDB(Base):
     premium_admin = Column(Boolean, default=False)
     acesso_livre = Column(Boolean, default=False)
     pode_acessar_adm = Column(Boolean, default=False)
+    pode_atender_chat = Column(Boolean, default=False)
+    juros_perdoado_vencimento = Column(String, nullable=True)
+    juros_perdoado_em = Column(DateTime, nullable=True)
+    juros_perdoado_por = Column(String, nullable=True)
     deletado = Column(Boolean, default=False)
     deletado_em = Column(DateTime, nullable=True)
     cpf_original = Column(String, nullable=True)
@@ -137,6 +141,8 @@ class PagamentoDB(Base):
     reembolsado_em = Column(DateTime, nullable=True)
     pagamento_reembolsado_id = Column(Integer, nullable=True)
     observacao = Column(Text, nullable=True)
+    tipo_evento = Column(String, nullable=True)
+    valor_juros = Column(Float, default=0.0)
 
     aluno = relationship("AlunoDB")
 
@@ -262,6 +268,33 @@ class PromocaoAplicacaoDB(Base):
     aluno = relationship("AlunoDB")
 
 
+
+class ConversaChatDB(Base):
+    __tablename__ = "conversas_chat"
+    id = Column(Integer, primary_key=True, index=True)
+    aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
+    criada_em = Column(DateTime, default=datetime.utcnow)
+    atualizada_em = Column(DateTime, default=datetime.utcnow)
+    ultima_mensagem_em = Column(DateTime, nullable=True)
+    status = Column(String, default="aberta")
+    mensagens_nao_lidas_professor = Column(Integer, default=0)
+    mensagens_nao_lidas_aluno = Column(Integer, default=0)
+    aluno = relationship("AlunoDB")
+
+class MensagemChatDB(Base):
+    __tablename__ = "mensagens_chat"
+    id = Column(Integer, primary_key=True, index=True)
+    conversa_id = Column(Integer, ForeignKey("conversas_chat.id"), nullable=False, index=True)
+    aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
+    remetente_tipo = Column(String, nullable=False)  # aluno / professor / adm
+    remetente_id = Column(Integer, nullable=True)
+    remetente_nome = Column(String, nullable=True)
+    mensagem = Column(Text, nullable=False)
+    criada_em = Column(DateTime, default=datetime.utcnow)
+    lida_em = Column(DateTime, nullable=True)
+    status = Column(String, default="enviada")
+    conversa = relationship("ConversaChatDB")
+
 def ensure_schema_updates():
     """
     Mantém o banco compatível com o app mesmo quando o PostgreSQL é recriado vazio
@@ -308,6 +341,10 @@ def ensure_schema_updates():
             "premium_admin": "ALTER TABLE alunos ADD COLUMN premium_admin BOOLEAN DEFAULT FALSE",
             "acesso_livre": "ALTER TABLE alunos ADD COLUMN acesso_livre BOOLEAN DEFAULT FALSE",
             "pode_acessar_adm": "ALTER TABLE alunos ADD COLUMN pode_acessar_adm BOOLEAN DEFAULT FALSE",
+            "pode_atender_chat": "ALTER TABLE alunos ADD COLUMN pode_atender_chat BOOLEAN DEFAULT FALSE",
+            "juros_perdoado_vencimento": "ALTER TABLE alunos ADD COLUMN juros_perdoado_vencimento VARCHAR(20)",
+            "juros_perdoado_em": "ALTER TABLE alunos ADD COLUMN juros_perdoado_em TIMESTAMP",
+            "juros_perdoado_por": "ALTER TABLE alunos ADD COLUMN juros_perdoado_por VARCHAR(120)",
             "gympass_acessos_dia": "ALTER TABLE alunos ADD COLUMN gympass_acessos_dia INTEGER DEFAULT 0",
             "deletado": "ALTER TABLE alunos ADD COLUMN deletado BOOLEAN DEFAULT FALSE",
             "deletado_em": "ALTER TABLE alunos ADD COLUMN deletado_em TIMESTAMP",
@@ -335,7 +372,7 @@ def ensure_schema_updates():
     # conflitos de índice em bancos antigos; criamos só o que estiver faltando.
     insp = inspect(engine)
     table_names = set(insp.get_table_names())
-    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB, PreCadastroAlunoDB, PromocaoDB, PromocaoAplicacaoDB]:
+    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB, PreCadastroAlunoDB, PromocaoDB, PromocaoAplicacaoDB, ConversaChatDB, MensagemChatDB]:
         if model.__tablename__ not in table_names:
             try:
                 model.__table__.create(bind=engine, checkfirst=True)
@@ -366,6 +403,8 @@ def ensure_schema_updates():
             "reembolsado_em": "ALTER TABLE pagamentos ADD COLUMN reembolsado_em TIMESTAMP",
             "pagamento_reembolsado_id": "ALTER TABLE pagamentos ADD COLUMN pagamento_reembolsado_id INTEGER",
             "observacao": "ALTER TABLE pagamentos ADD COLUMN observacao TEXT",
+            "tipo_evento": "ALTER TABLE pagamentos ADD COLUMN tipo_evento VARCHAR(80)",
+            "valor_juros": "ALTER TABLE pagamentos ADD COLUMN valor_juros FLOAT DEFAULT 0",
         }
 
         for col_name, cmd in expected_columns.items():
@@ -601,6 +640,20 @@ class ValorManualBody(BaseModel):
     ativo: bool = True
     observacao: Optional[str] = None
 
+
+class RetirarJurosBody(BaseModel):
+    usuario_admin: Optional[str] = "ADM"
+    observacao: Optional[str] = "Juros retirado manualmente pelo administrador"
+
+class ChatMensagemBody(BaseModel):
+    aluno_id: Optional[int] = None
+    professor_id: Optional[int] = None
+    remetente_tipo: Optional[str] = None
+    mensagem: str
+
+class ProfessorChatPermissaoBody(BaseModel):
+    pode_atender_chat: bool
+
 # ----------------------
 # Helpers
 # ----------------------
@@ -733,17 +786,38 @@ def dias_atraso(vencimento: Optional[str]) -> int:
         return 0
     return (hoje() - venc).days
 
+def dias_uteis_atraso(vencimento: Optional[str]) -> int:
+    venc = parse_date_safe(vencimento)
+    if not venc:
+        return 0
+    inicio = venc + timedelta(days=1)
+    fim = hoje()
+    if fim < inicio:
+        return 0
+    total = 0
+    cursor = inicio
+    while cursor <= fim:
+        if cursor.weekday() < 5:
+            total += 1
+        cursor += timedelta(days=1)
+    return total
+
 def juros_atraso_aluno(aluno: AlunoDB) -> float:
-    """Juros simples por atraso: R$ 1,00 por dia vencido, limitado a R$ 5,00.
-    Não altera o plano nem o desconto do aluno; só entra no valor cobrado enquanto estiver atrasado.
+    """Juros por atraso: 3 dias úteis sem juros; depois R$ 1/dia útil, máximo R$ 5.
+    Acesso continua bloqueado assim que vence; esta regra altera apenas o valor cobrado.
+    Se o ADM perdoar juros para o vencimento atual, retorna 0 até o aluno renovar.
     """
     if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno):
         return 0.0
     plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
     if "gympass" in plano:
         return 0.0
-    dias = max(0, dias_atraso(getattr(aluno, "vencimento", None)))
-    return round(min(dias, 5) * 1.0, 2)
+    vencimento = getattr(aluno, "vencimento", None)
+    if getattr(aluno, "juros_perdoado_vencimento", None) and str(aluno.juros_perdoado_vencimento) == str(vencimento):
+        return 0.0
+    uteis = dias_uteis_atraso(vencimento)
+    dias_com_juros = max(0, uteis - 3)
+    return round(min(dias_com_juros, 5) * 1.0, 2)
 
 def aluno_premium_admin(aluno: AlunoDB) -> bool:
     return bool(getattr(aluno, "premium_admin", False))
@@ -957,6 +1031,10 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "adm_premium": premium_admin,
         "acesso_livre": acesso_livre,
         "pode_acessar_adm": pode_acessar_adm,
+        "pode_atender_chat": bool(getattr(aluno, "pode_atender_chat", False)),
+        "juros_perdoado_vencimento": getattr(aluno, "juros_perdoado_vencimento", None),
+        "juros_perdoado_em": aluno.juros_perdoado_em.isoformat() if getattr(aluno, "juros_perdoado_em", None) else None,
+        "dias_uteis_atraso": dias_uteis_atraso(getattr(aluno, "vencimento", None)),
         "tipo_aluno": "Professor/Premium" if premium_admin else ("Acesso Livre" if acesso_livre else "Aluno comum"),
         "dias_pendentes_restantes": dias_pendentes_restantes,
         "dias_para_vencer": dias_para_vencer,
@@ -2988,6 +3066,235 @@ def webhook_infinitepay(body: Optional[dict] = Body(default=None), db=Depends(ge
         "pagamento": pagamento_dict(pagamento),
     }
 
+
+
+# ----------------------
+# Juros / Chat
+# ----------------------
+@app.post("/pagamentos/retirar-juros/{aluno_id}")
+def retirar_juros_aluno(aluno_id: int, body: RetirarJurosBody = Body(default_factory=RetirarJurosBody)):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        juros_atual = juros_atraso_aluno(aluno)
+        aluno.juros_perdoado_vencimento = aluno.vencimento
+        aluno.juros_perdoado_em = datetime.utcnow()
+        aluno.juros_perdoado_por = body.usuario_admin or "ADM"
+        aluno.updated_at = datetime.utcnow()
+        registro = PagamentoDB(
+            aluno_id=aluno.id,
+            plano_nome=aluno.plano_nome or "Juros",
+            valor=0.0,
+            dias=0,
+            status="juros_retirado",
+            origem="manual_admin",
+            data_pagamento=datetime.utcnow(),
+            vencimento_anterior=aluno.vencimento,
+            novo_vencimento=aluno.vencimento,
+            observacao=body.observacao or "Juros retirado manualmente pelo administrador",
+            tipo_evento="juros_retirado",
+            valor_juros=juros_atual,
+        )
+        db.add(registro)
+        db.commit()
+        db.refresh(aluno)
+        return {"ok": True, "message": "Juros retirado com sucesso", "juros_retirado": juros_atual, "aluno": aluno_dict(db, aluno)}
+    finally:
+        db.close()
+
+def get_or_create_conversa(db, aluno_id: int) -> ConversaChatDB:
+    conversa = db.query(ConversaChatDB).filter(ConversaChatDB.aluno_id == aluno_id).first()
+    if conversa:
+        return conversa
+    conversa = ConversaChatDB(aluno_id=aluno_id, criada_em=datetime.utcnow(), atualizada_em=datetime.utcnow(), ultima_mensagem_em=datetime.utcnow())
+    db.add(conversa)
+    db.commit()
+    db.refresh(conversa)
+    return conversa
+
+def conversa_dict(db, conversa: ConversaChatDB) -> dict:
+    aluno = buscar_aluno_por_id(db, conversa.aluno_id, incluir_deletados=False)
+    ultima = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa.id).order_by(MensagemChatDB.criada_em.desc()).first()
+    return {
+        "id": conversa.id,
+        "aluno_id": conversa.aluno_id,
+        "aluno_nome": aluno.nome if aluno else "Aluno",
+        "aluno_cpf": aluno.cpf if aluno else "",
+        "aluno_telefone": aluno.telefone if aluno else "",
+        "ultima_mensagem": ultima.mensagem if ultima else "",
+        "ultima_mensagem_em": (ultima.criada_em.isoformat() if ultima and ultima.criada_em else (conversa.ultima_mensagem_em.isoformat() if conversa.ultima_mensagem_em else None)),
+        "mensagens_nao_lidas_professor": conversa.mensagens_nao_lidas_professor or 0,
+        "mensagens_nao_lidas_aluno": conversa.mensagens_nao_lidas_aluno or 0,
+        "status": conversa.status,
+    }
+
+def mensagem_dict(msg: MensagemChatDB) -> dict:
+    return {
+        "id": msg.id,
+        "conversa_id": msg.conversa_id,
+        "aluno_id": msg.aluno_id,
+        "remetente_tipo": msg.remetente_tipo,
+        "remetente_id": msg.remetente_id,
+        "remetente_nome": msg.remetente_nome,
+        "mensagem": msg.mensagem,
+        "criada_em": msg.criada_em.isoformat() if msg.criada_em else None,
+        "lida_em": msg.lida_em.isoformat() if msg.lida_em else None,
+        "status": msg.status,
+    }
+
+def validar_professor_chat(db, professor_id: int) -> AlunoDB:
+    prof = buscar_aluno_por_id(db, professor_id)
+    if not prof or not aluno_premium_admin(prof) or not bool(getattr(prof, "pode_atender_chat", False)):
+        raise HTTPException(status_code=403, detail="Professor sem permissão para atender chat")
+    return prof
+
+@app.get("/chat/minha-conversa")
+def chat_minha_conversa(aluno_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        conversa = get_or_create_conversa(db, aluno_id)
+        return conversa_dict(db, conversa)
+    finally:
+        db.close()
+
+@app.get("/chat/minha-conversa/mensagens")
+def chat_minhas_mensagens(aluno_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        conversa = get_or_create_conversa(db, aluno_id)
+        mensagens = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa.id).order_by(MensagemChatDB.criada_em.asc()).all()
+        return [mensagem_dict(m) for m in mensagens]
+    finally:
+        db.close()
+
+@app.post("/chat/minha-conversa/mensagens")
+def chat_enviar_aluno(body: ChatMensagemBody = Body(...)):
+    db = SessionLocal()
+    try:
+        aluno_id = int(body.aluno_id or 0)
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        msg_txt = (body.mensagem or "").strip()
+        if not msg_txt:
+            raise HTTPException(status_code=400, detail="Mensagem vazia")
+        conversa = get_or_create_conversa(db, aluno_id)
+        msg = MensagemChatDB(conversa_id=conversa.id, aluno_id=aluno_id, remetente_tipo="aluno", remetente_id=aluno_id, remetente_nome=aluno.nome, mensagem=msg_txt, criada_em=datetime.utcnow())
+        conversa.atualizada_em = datetime.utcnow()
+        conversa.ultima_mensagem_em = msg.criada_em
+        conversa.mensagens_nao_lidas_professor = int(conversa.mensagens_nao_lidas_professor or 0) + 1
+        db.add(msg)
+        db.commit()
+        db.refresh(msg)
+        return {"ok": True, "mensagem": mensagem_dict(msg), "conversa": conversa_dict(db, conversa)}
+    finally:
+        db.close()
+
+@app.post("/chat/minha-conversa/marcar-lidas")
+def chat_aluno_marcar_lidas(aluno_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        conversa = get_or_create_conversa(db, aluno_id)
+        now = datetime.utcnow()
+        db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa.id, MensagemChatDB.remetente_tipo.in_(["professor", "adm"]), MensagemChatDB.lida_em.is_(None)).update({MensagemChatDB.lida_em: now}, synchronize_session=False)
+        conversa.mensagens_nao_lidas_aluno = 0
+        conversa.atualizada_em = now
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+@app.get("/chat/conversas")
+def chat_conversas(professor_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        validar_professor_chat(db, professor_id)
+        conversas = db.query(ConversaChatDB).order_by(ConversaChatDB.ultima_mensagem_em.desc().nullslast(), ConversaChatDB.atualizada_em.desc()).all()
+        return [conversa_dict(db, c) for c in conversas]
+    finally:
+        db.close()
+
+@app.get("/chat/conversas/{conversa_id}/mensagens")
+def chat_conversa_mensagens(conversa_id: int, professor_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        validar_professor_chat(db, professor_id)
+        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+        mensagens = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa_id).order_by(MensagemChatDB.criada_em.asc()).all()
+        return {"conversa": conversa_dict(db, conversa), "mensagens": [mensagem_dict(m) for m in mensagens]}
+    finally:
+        db.close()
+
+@app.post("/chat/conversas/{conversa_id}/mensagens")
+def chat_professor_responder(conversa_id: int, body: ChatMensagemBody = Body(...)):
+    db = SessionLocal()
+    try:
+        professor_id = int(body.professor_id or body.remetente_id or 0)
+        prof = validar_professor_chat(db, professor_id)
+        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+        msg_txt = (body.mensagem or "").strip()
+        if not msg_txt:
+            raise HTTPException(status_code=400, detail="Mensagem vazia")
+        msg = MensagemChatDB(conversa_id=conversa_id, aluno_id=conversa.aluno_id, remetente_tipo="professor", remetente_id=professor_id, remetente_nome=prof.nome, mensagem=msg_txt, criada_em=datetime.utcnow())
+        conversa.atualizada_em = datetime.utcnow()
+        conversa.ultima_mensagem_em = msg.criada_em
+        conversa.mensagens_nao_lidas_aluno = int(conversa.mensagens_nao_lidas_aluno or 0) + 1
+        db.add(msg)
+        db.commit()
+        db.refresh(msg)
+        return {"ok": True, "mensagem": mensagem_dict(msg), "conversa": conversa_dict(db, conversa)}
+    finally:
+        db.close()
+
+@app.post("/chat/conversas/{conversa_id}/marcar-lidas")
+def chat_professor_marcar_lidas(conversa_id: int, professor_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        validar_professor_chat(db, professor_id)
+        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+        now = datetime.utcnow()
+        db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa_id, MensagemChatDB.remetente_tipo == "aluno", MensagemChatDB.lida_em.is_(None)).update({MensagemChatDB.lida_em: now}, synchronize_session=False)
+        conversa.mensagens_nao_lidas_professor = 0
+        conversa.atualizada_em = now
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+@app.get("/admin/professores-chat")
+def admin_professores_chat():
+    db = SessionLocal()
+    try:
+        professores = db.query(AlunoDB).filter(AlunoDB.premium_admin == True, or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()
+        return [aluno_dict(db, p) for p in professores]
+    finally:
+        db.close()
+
+@app.patch("/admin/professores-chat/{professor_id}")
+def admin_alterar_professor_chat(professor_id: int, body: ProfessorChatPermissaoBody = Body(...)):
+    db = SessionLocal()
+    try:
+        prof = buscar_aluno_por_id(db, professor_id)
+        if not prof or not aluno_premium_admin(prof):
+            raise HTTPException(status_code=404, detail="Professor/Premium não encontrado")
+        prof.pode_atender_chat = bool(body.pode_atender_chat)
+        prof.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(prof)
+        return {"ok": True, "professor": aluno_dict(db, prof)}
+    finally:
+        db.close()
 
 @app.get("/pagamentos/retorno")
 def retorno_pagamento_infinitepay(
