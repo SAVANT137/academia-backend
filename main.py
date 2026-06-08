@@ -30,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.2.3"
+APP_VERSION = "5.2.4"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -1160,6 +1160,7 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "valor_final": total_a_pagar,
         "total_a_pagar": total_a_pagar,
         "juros_atraso": juros,
+        "multa_atraso": juros,
         "vencimento": aluno.vencimento,
         "data_inicio_plano": getattr(aluno, "data_inicio_plano", None),
         "dia_vencimento_fixo": getattr(aluno, "dia_vencimento_fixo", None),
@@ -2151,6 +2152,7 @@ def reabrir_pedidos_catraca_travados(db, aluno_id: Optional[int] = None) -> int:
 def obter_qr_catraca():
     return {"codigo": QR_CATRACA, "qr_image_base64": qrcode_base64(QR_CATRACA)}
 
+@app.get("/catraca/solicitar/{aluno_id}")
 @app.post("/catraca/solicitar/{aluno_id}")
 def solicitar_liberacao_catraca(aluno_id: int):
     """
@@ -3254,7 +3256,7 @@ def retirar_juros_aluno(aluno_id: int, body: RetirarJurosBody = Body(default_fac
         db.add(registro)
         db.commit()
         db.refresh(aluno)
-        return {"ok": True, "message": "Juros retirado com sucesso", "juros_retirado": juros_atual, "aluno": aluno_dict(db, aluno)}
+        return {"ok": True, "message": "Multa retirada com sucesso", "juros_retirado": juros_atual, "aluno": aluno_dict(db, aluno)}
     finally:
         db.close()
 
