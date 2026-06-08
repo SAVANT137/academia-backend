@@ -58,6 +58,7 @@ PROMOCIONAL_VALOR_PADRAO = 80.90
 PROMOCIONAL_DIAS_PADRAO = 30
 DIARIA_VALOR = 35.0
 GYMPASS_VALOR = 0.0
+TOTAL_PASS_VALOR = 0.0
 
 INFINITEPAY_CHECKOUT_URL = "https://api.checkout.infinitepay.io/links"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://academia-backend-aksl.onrender.com").strip()
@@ -216,6 +217,7 @@ class GympassSolicitacaoDB(Base):
     status = Column(Text, default="solicitado", index=True)
     # solicitado | liberado | negado | expirado
     usado_no_dia = Column(Integer, default=0)
+    tipo_pass = Column(Text, default="Gympass", index=True)
     liberado_por_id = Column(Integer, nullable=True)
     liberado_por_nome = Column(Text, nullable=True)
     observacao = Column(Text, nullable=True)
@@ -466,6 +468,29 @@ def ensure_schema_updates():
                 except Exception:
                     pass
 
+    # 7) Ajustes para controle separado de Gympass e Total Pass.
+    insp = inspect(engine)
+    if "gympass_solicitacoes" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("gympass_solicitacoes")}
+        with engine.begin() as conn:
+            if "tipo_pass" not in cols:
+                try:
+                    conn.execute(text("ALTER TABLE gympass_solicitacoes ADD COLUMN tipo_pass TEXT DEFAULT 'Gympass'"))
+                except Exception:
+                    pass
+            if is_postgres:
+                for cmd in [
+                    "ALTER TABLE public.gympass_solicitacoes ALTER COLUMN cpf TYPE TEXT",
+                    "ALTER TABLE public.gympass_solicitacoes ALTER COLUMN nome TYPE TEXT",
+                    "ALTER TABLE public.gympass_solicitacoes ALTER COLUMN status TYPE TEXT",
+                    "ALTER TABLE public.gympass_solicitacoes ALTER COLUMN observacao TYPE TEXT",
+                    "ALTER TABLE public.gympass_solicitacoes ALTER COLUMN tipo_pass TYPE TEXT",
+                ]:
+                    try:
+                        conn.execute(text(cmd))
+                    except Exception:
+                        pass
+
 ensure_schema_updates()
 
 def init_database():
@@ -568,7 +593,7 @@ class DescontoBody(BaseModel):
     desconto_percentual: Optional[float] = Field(None, ge=0, le=100)
 
 class PagamentoBody(BaseModel):
-    plano: Literal["atual", "mensal", "semestral", "anual", "promocional", "diaria", "gympass"]
+    plano: Literal["atual", "mensal", "semestral", "anual", "promocional", "diaria", "gympass", "total_pass", "total pass", "totalpass"]
     valor: Optional[float] = None
     dias: Optional[int] = None
     origem: Literal["manual", "aluno_link"] = "manual"
@@ -726,7 +751,7 @@ def clamp_dia_vencimento(value: Optional[int]) -> Optional[int]:
 def meses_por_plano_dias(dias: Optional[int], plano_nome: Optional[str] = None) -> int:
     nome = (plano_nome or "").strip().lower()
     d = int(dias or 30)
-    if "gympass" in nome or d <= 0:
+    if plano_pass_tipo(nome) or d <= 0:
         return 0
     if "diária" in nome or "diaria" in nome or d <= 1:
         return 0
@@ -767,7 +792,7 @@ def calcular_novo_vencimento_fixo(aluno: AlunoDB, dias: Optional[int], plano_nom
     nome_plano = (plano_nome or "").strip().lower()
     if "diária" in nome_plano or "diaria" in nome_plano or int(dias or 0) <= 1:
         return hoje().strftime("%Y-%m-%d")
-    if "gympass" in nome_plano:
+    if plano_pass_tipo(nome_plano):
         return None
     meses = meses_por_plano_dias(dias, plano_nome)
     dia_fixo = inferir_dia_vencimento_fixo(aluno)
@@ -810,7 +835,7 @@ def juros_atraso_aluno(aluno: AlunoDB) -> float:
     if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno):
         return 0.0
     plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
-    if "gympass" in plano:
+    if plano_pass_tipo(plano):
         return 0.0
     vencimento = getattr(aluno, "vencimento", None)
     if getattr(aluno, "juros_perdoado_vencimento", None) and str(aluno.juros_perdoado_vencimento) == str(vencimento):
@@ -829,7 +854,7 @@ def aluno_deve_inativar_por_atraso(aluno: AlunoDB) -> bool:
     if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) or aluno_super_admin(aluno):
         return False
     plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
-    if "gympass" in plano:
+    if plano_pass_tipo(plano):
         return False
     venc = parse_date_safe(getattr(aluno, "vencimento", None))
     if not venc:
@@ -888,6 +913,77 @@ def processar_inativacao_por_atraso(db, aluno: AlunoDB) -> bool:
     db.add(auditoria)
     return True
 
+def plano_pass_tipo(plano_nome: Optional[str]) -> Optional[str]:
+    nome = (plano_nome or "").strip().lower().replace("_", " ").replace("-", " ")
+    if "total" in nome and "pass" in nome:
+        return "Total Pass"
+    if "gympass" in nome or "gym pass" in nome:
+        return "Gympass"
+    return None
+
+def aluno_eh_gympass(aluno: AlunoDB) -> bool:
+    return plano_pass_tipo(getattr(aluno, "plano_nome", None)) == "Gympass"
+
+def aluno_eh_total_pass(aluno: AlunoDB) -> bool:
+    return plano_pass_tipo(getattr(aluno, "plano_nome", None)) == "Total Pass"
+
+def aluno_eh_pass(aluno: AlunoDB) -> bool:
+    return plano_pass_tipo(getattr(aluno, "plano_nome", None)) is not None
+
+def inicio_fim_dia_utc() -> tuple[datetime, datetime]:
+    # O app opera no Brasil; o banco salva UTC. Para evitar dependência externa,
+    # usamos a janela local do servidor como referência diária do sistema.
+    inicio = datetime.combine(hoje(), datetime.min.time())
+    fim = inicio + timedelta(days=1)
+    return inicio, fim
+
+def pass_usados_hoje(db, aluno_id: int, tipo_pass: Optional[str] = None) -> int:
+    inicio, fim = inicio_fim_dia_utc()
+    query = db.query(EntradaDB).filter(
+        EntradaDB.aluno_id == aluno_id,
+        EntradaDB.status == "liberado",
+        EntradaDB.data_entrada >= inicio,
+        EntradaDB.data_entrada < fim,
+    )
+    if tipo_pass:
+        tipo = tipo_pass.lower()
+        query = query.filter(EntradaDB.motivo.ilike(f"%{tipo}%"))
+    else:
+        query = query.filter(or_(EntradaDB.motivo.ilike("%gympass%"), EntradaDB.motivo.ilike("%total pass%"), EntradaDB.motivo.ilike("%total_pass%")))
+    return query.count()
+
+def gympass_usados_hoje(db, aluno_id: int) -> int:
+    return pass_usados_hoje(db, aluno_id, "gympass")
+
+def registrar_acesso_pass_automatico(db, aluno: AlunoDB, tipo_pass: str, usados_antes: int) -> tuple[LiberacaoCatracaDB, GympassSolicitacaoDB]:
+    pedido = LiberacaoCatracaDB(
+        aluno_id=aluno.id,
+        cpf=aluno.cpf,
+        nome=aluno.nome,
+        status="pendente",
+        segundos=5,
+        sentido="ambos",
+        motivo=f"{tipo_pass} — liberado automaticamente",
+        atualizado_em=datetime.utcnow(),
+    )
+    historico = GympassSolicitacaoDB(
+        aluno_id=aluno.id,
+        cpf=aluno.cpf,
+        nome=aluno.nome,
+        status="liberado",
+        usado_no_dia=usados_antes + 1,
+        tipo_pass=tipo_pass,
+        liberado_por_nome="Sistema",
+        observacao=f"Acesso via {tipo_pass} liberado automaticamente",
+        criado_em=datetime.utcnow(),
+        liberado_em=datetime.utcnow(),
+        atualizado_em=datetime.utcnow(),
+    )
+    db.add(pedido)
+    db.add(historico)
+    registrar_evento_entrada(db, aluno, "liberado", f"{tipo_pass} — liberado automaticamente — usado {usados_antes + 1}/2 no dia")
+    return pedido, historico
+
 def aluno_premium_admin(aluno: AlunoDB) -> bool:
     return bool(getattr(aluno, "premium_admin", False))
 
@@ -899,14 +995,14 @@ def aluno_super_admin(aluno: AlunoDB) -> bool:
     return bool(getattr(aluno, "pode_acessar_adm", False)) or cpf == "87740648191"
 
 def aluno_sem_cobranca(aluno: AlunoDB) -> bool:
-    return aluno_premium_admin(aluno) or aluno_acesso_livre(aluno)
+    return aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) or aluno_eh_pass(aluno)
 
 def obter_status_por_regras(aluno: AlunoDB) -> str:
     if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno):
         return "em_dia"
 
     plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
-    if "gympass" in plano:
+    if plano_pass_tipo(plano):
         return "em_dia"
 
     venc = parse_date_safe(aluno.vencimento)
@@ -943,6 +1039,9 @@ def info_plano(db, plano_key: str, valor_override: Optional[float] = None, dias_
         "diaria": {"nome": "Diária", "valor": DIARIA_VALOR, "dias": 1},
         "diária": {"nome": "Diária", "valor": DIARIA_VALOR, "dias": 1},
         "gympass": {"nome": "Gympass", "valor": GYMPASS_VALOR, "dias": 0},
+        "total_pass": {"nome": "Total Pass", "valor": TOTAL_PASS_VALOR, "dias": 0},
+        "total pass": {"nome": "Total Pass", "valor": TOTAL_PASS_VALOR, "dias": 0},
+        "totalpass": {"nome": "Total Pass", "valor": TOTAL_PASS_VALOR, "dias": 0},
     }
     item = tabela.get(plano_key)
     if not item:
@@ -1006,8 +1105,8 @@ def valor_base_plano_nome(db, plano_nome: Optional[str]) -> float:
         return SEMESTRAL_VALOR
     if "diária" in nome or "diaria" in nome:
         return DIARIA_VALOR
-    if "gympass" in nome:
-        return GYMPASS_VALOR
+    if plano_pass_tipo(nome):
+        return 0.0
     if "promo" in nome:
         return float(get_config(db, "promocional_valor", str(PROMOCIONAL_VALOR_PADRAO)))
     return MENSAL_VALOR
@@ -1139,11 +1238,13 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "juros_perdoado_vencimento": getattr(aluno, "juros_perdoado_vencimento", None),
         "juros_perdoado_em": aluno.juros_perdoado_em.isoformat() if getattr(aluno, "juros_perdoado_em", None) else None,
         "dias_uteis_atraso": dias_uteis_atraso(getattr(aluno, "vencimento", None)),
-        "tipo_aluno": "Professor/Premium" if premium_admin else ("Acesso Livre" if acesso_livre else "Aluno comum"),
+        "tipo_aluno": "Professor/Premium" if premium_admin else ("Acesso Livre" if acesso_livre else (plano_pass_tipo(aluno.plano_nome) or "Aluno comum")),
         "dias_pendentes_restantes": dias_pendentes_restantes,
         "dias_para_vencer": dias_para_vencer,
-        "gympass": "gympass" in (aluno.plano_nome or "").strip().lower(),
-        "aviso_pagamento": ("Acesso vitalício — aluno com privilégio ADM/Premium." if premium_admin else ("Acesso livre — sem mensalidade e sem vencimento." if acesso_livre else ("Sua mensalidade está próxima do vencimento. Regularize o pagamento para evitar o bloqueio do acesso à catraca." if status == "pendente" else None))),
+        "gympass": aluno_eh_gympass(aluno),
+        "total_pass": aluno_eh_total_pass(aluno),
+        "pass_tipo": plano_pass_tipo(aluno.plano_nome),
+        "aviso_pagamento": ("Acesso vitalício — aluno com privilégio ADM/Premium." if premium_admin else ("Acesso livre — sem mensalidade e sem vencimento." if acesso_livre else (f"{plano_pass_tipo(aluno.plano_nome)} — 2 acessos por dia, sem cobrança no app." if plano_pass_tipo(aluno.plano_nome) else ("Sua mensalidade está próxima do vencimento. Regularize para evitar bloqueio." if status == "pendente" else None)))),
         "plano_nome": aluno.plano_nome,
         "valor_plano": float(aluno.valor_plano or 0),
         "valor_padrao_plano": valor_padrao,
@@ -1325,6 +1426,7 @@ def obter_config_planos():
             },
             "diaria": {"valor": DIARIA_VALOR, "dias": 1, "link": ""},
             "gympass": {"valor": GYMPASS_VALOR, "dias": 0, "link": ""},
+            "total_pass": {"valor": TOTAL_PASS_VALOR, "dias": 0, "link": ""},
         }
     finally:
         db.close()
@@ -1376,7 +1478,8 @@ def criar_aluno(body: AlunoCreate = Body(...)):
         payload_pode_acessar_adm = bool(getattr(body, "pode_acessar_adm", False) or False)
         if payload_premium_admin:
             payload_acesso_livre = False
-        payload_sem_cobranca = payload_premium_admin or payload_acesso_livre
+        payload_tipo_pass = plano_pass_tipo(payload_plano)
+        payload_sem_cobranca = payload_premium_admin or payload_acesso_livre or bool(payload_tipo_pass)
         payload_data_inicio = normalizar_data_texto(body.data_inicio_plano)
         payload_vencimento = normalizar_data_texto(body.vencimento)
         payload_dia_fixo = clamp_dia_vencimento(body.dia_vencimento_fixo)
@@ -1426,7 +1529,7 @@ def criar_aluno(body: AlunoCreate = Body(...)):
     dia_vencimento_fixo=None if payload_sem_cobranca else (payload_dia_fixo or ((parse_date_safe(payload_vencimento) or parse_date_safe(payload_data_inicio) or hoje()).day)),
     data_cadastro=agora_str(),
     status_cliente_raw="Ativo" if payload_sem_cobranca else "pendente",
-    status_contrato_raw=("ADM/Premium" if payload_premium_admin else ("Acesso Livre" if payload_acesso_livre else "aguardando_pagamento")),
+    status_contrato_raw=("ADM/Premium" if payload_premium_admin else ("Acesso Livre" if payload_acesso_livre else (payload_tipo_pass or "aguardando_pagamento"))),
     premium_admin=payload_premium_admin,
     acesso_livre=payload_acesso_livre,
     pode_acessar_adm=payload_pode_acessar_adm,
@@ -1518,7 +1621,22 @@ def atualizar_aluno_admin(aluno_id: int, body: AlunoAdminUpdate):
         aluno.email = (body.email or "").strip() or None
         aluno.sexo = (body.sexo or "").strip() or None
         if body.plano_nome is not None:
-            aluno.plano_nome = body.plano_nome
+            plano_info_tipo = plano_pass_tipo(body.plano_nome)
+            aluno.plano_nome = plano_info_tipo or body.plano_nome
+            if plano_info_tipo:
+                aluno.status_manual = "em_dia"
+                aluno.vencimento = None
+                aluno.data_inicio_plano = None
+                aluno.dia_vencimento_fixo = None
+                aluno.valor_plano = 0.0
+                aluno.valor_padrao_plano = 0.0
+                aluno.desconto_valor = 0.0
+                aluno.valor_personalizado = None
+                aluno.valor_final_manual = None
+                aluno.valor_final_manual_ativo = False
+                aluno.beneficio_ativo = True
+                aluno.status_cliente_raw = "Ativo"
+                aluno.status_contrato_raw = plano_info_tipo
         if body.valor_plano is not None:
             aluno.valor_plano = body.valor_plano
             aluno.valor_padrao_plano = body.valor_plano
@@ -1566,7 +1684,7 @@ def atualizar_aluno_admin(aluno_id: int, body: AlunoAdminUpdate):
                 aluno.status_contrato_raw = "Acesso Livre"
         if getattr(body, "pode_acessar_adm", None) is not None:
             aluno.pode_acessar_adm = bool(body.pode_acessar_adm)
-        if not aluno.premium_admin and not aluno_acesso_livre(aluno) and not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
+        if not aluno.premium_admin and not aluno_acesso_livre(aluno) and not aluno_eh_pass(aluno) and not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
             aluno.dia_vencimento_fixo = inferir_dia_vencimento_fixo(aluno)
         aluno.updated_at = datetime.utcnow()
 
@@ -2063,8 +2181,9 @@ def aluno_pode_liberar_catraca(aluno: AlunoDB) -> tuple[bool, str]:
         return True, "Acesso livre liberado — sem mensalidade e sem timer."
 
     plano = (aluno.plano_nome or "").strip().lower()
-    if "gympass" in plano:
-        return False, "Gympass exige liberação de professor/ADM."
+    tipo_pass = plano_pass_tipo(plano)
+    if tipo_pass:
+        return True, f"{tipo_pass} liberado automaticamente."
 
     status = obter_status_por_regras(aluno)
     if status == "em_dia":
@@ -2082,6 +2201,9 @@ def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> No
         motivo = "Acesso liberado — aluno com privilégio ADM/Premium."
     if aluno_acesso_livre(aluno) and status == "liberado":
         motivo = "Acesso livre liberado — sem mensalidade."
+    tipo_pass = plano_pass_tipo(getattr(aluno, "plano_nome", None))
+    if tipo_pass and status == "liberado" and "liberado automaticamente" not in (motivo or "").lower():
+        motivo = f"{tipo_pass} — liberado automaticamente"
 
     # Evita duplicidade quando o aluno toca várias vezes no botão em poucos segundos.
     limite = datetime.utcnow() - timedelta(seconds=20)
@@ -2103,7 +2225,7 @@ def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> No
 
 
 def cooldown_catraca_restante(db, aluno: AlunoDB) -> int:
-    if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno):
+    if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) or aluno_eh_pass(aluno):
         return 0
     limite = datetime.utcnow() - timedelta(minutes=5)
     ultimo = (
@@ -2170,30 +2292,36 @@ def solicitar_liberacao_catraca(aluno_id: int):
             db.commit()
             db.refresh(aluno)
 
-        if aluno_eh_gympass(aluno) and not aluno_premium_admin(aluno):
-            usados = gympass_usados_hoje(db, aluno.id)
+        tipo_pass = plano_pass_tipo(aluno.plano_nome)
+        if tipo_pass and not aluno_premium_admin(aluno):
+            usados = pass_usados_hoje(db, aluno.id, tipo_pass)
             if usados >= 2:
                 return {
                     "ok": False,
                     "liberado": False,
-                    "gympass": True,
-                    "mensagem": "Você já utilizou seus 2 acessos Gympass de hoje. Tente novamente amanhã.",
+                    "pass_tipo": tipo_pass,
+                    "gympass": tipo_pass == "Gympass",
+                    "total_pass": tipo_pass == "Total Pass",
+                    "usados_hoje": usados,
+                    "mensagem": "Você já utilizou seus 2 acessos de hoje. Tente novamente amanhã.",
                 }
-            solicitacao = GympassSolicitacaoDB(
-                aluno_id=aluno.id, cpf=aluno.cpf, nome=aluno.nome,
-                status="solicitado", usado_no_dia=usados + 1,
-                observacao="Solicitação criada pelo app do aluno", atualizado_em=datetime.utcnow(),
-            )
-            db.add(solicitacao)
+            reabrir_pedidos_catraca_travados(db, aluno.id)
+            pedido, historico = registrar_acesso_pass_automatico(db, aluno, tipo_pass, usados)
             db.commit()
-            db.refresh(solicitacao)
+            db.refresh(pedido)
+            db.refresh(historico)
             return {
                 "ok": True,
-                "liberado": False,
-                "gympass": True,
-                "solicitacao_id": solicitacao.id,
+                "liberado": True,
+                "pedido_id": pedido.id,
+                "historico_id": historico.id,
+                "status_pedido": pedido.status,
+                "pass_tipo": tipo_pass,
+                "gympass": tipo_pass == "Gympass",
+                "total_pass": tipo_pass == "Total Pass",
                 "usados_hoje": usados + 1,
-                "mensagem": "Solicitação enviada. Aguarde um professor liberar seu acesso.",
+                "mensagem": f"Acesso liberado automaticamente via {tipo_pass}. Usado {usados + 1}/2 hoje.",
+                "notificacao": f"Novo acesso {tipo_pass}: {aluno.nome} entrou.",
             }
 
         pode, mensagem = aluno_pode_liberar_catraca(aluno)
@@ -2245,10 +2373,11 @@ def solicitar_liberacao_catraca(aluno_id: int):
             .first()
         )
         if existente:
+            status_atual = obter_status_por_regras(aluno)
             if existente.status == "em_execucao":
                 mensagem_existente = "Pedido já está em execução pelo agente. Empurre a catraca quando liberar."
             else:
-                mensagem_existente = "Pedido de liberação enviado. Aguarde a catraca."
+                mensagem_existente = "Seu acesso foi liberado. Atenção: sua mensalidade está próxima do vencimento." if status_atual == "pendente" else "Pedido de liberação enviado. Aguarde a catraca."
             registrar_evento_entrada(db, aluno, "liberado", "premium" if aluno_premium_admin(aluno) else ("acesso_livre" if aluno_acesso_livre(aluno) else ("pendente" if obter_status_por_regras(aluno) == "pendente" else "catraca")))
             db.commit()
             return {
@@ -2279,7 +2408,7 @@ def solicitar_liberacao_catraca(aluno_id: int):
             "liberado": True,
             "pedido_id": pedido.id,
             "status_pedido": pedido.status,
-            "mensagem": mensagem if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) or obter_status_por_regras(aluno) == "pendente" else "Pedido enviado. Aguarde a liberação da catraca.",
+            "mensagem": "Seu acesso foi liberado. Atenção: sua mensalidade está próxima do vencimento." if obter_status_por_regras(aluno) == "pendente" else (mensagem if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) else "Pedido enviado. Aguarde a liberação da catraca."),
             "premium_admin": aluno_premium_admin(aluno),
             "acesso_livre": aluno_acesso_livre(aluno),
             "status_aluno": obter_status_por_regras(aluno),
@@ -2402,18 +2531,18 @@ def registrar_entrada(aluno_id: int, body: EntradaBody = Body(...)):
         status_aluno = obter_status_por_regras(aluno)
         codigo_qr = (body.codigo_qr or "").strip()
 
-        if status_aluno != "em_dia":
+        if status_aluno not in {"em_dia", "pendente"}:
             item = EntradaDB(
                 aluno_id=aluno.id,
                 nome=aluno.nome,
                 status="bloqueado",
-                motivo="pendente",
+                motivo=status_aluno or "bloqueado",
             )
             db.add(item)
             db.commit()
             return {
                 "acesso": "bloqueado",
-                "mensagem": "Pagamento pendente. Regularize sua mensalidade.",
+                "mensagem": "Aluno atrasado ou inativo. Regularize sua mensalidade.",
                 "ir_para_pagamento": True,
             }
 
@@ -2430,6 +2559,41 @@ def registrar_entrada(aluno_id: int, body: EntradaBody = Body(...)):
                 "acesso": "bloqueado",
                 "mensagem": "QR da catraca inválido.",
                 "ir_para_pagamento": False,
+            }
+
+        tipo_pass = plano_pass_tipo(aluno.plano_nome)
+        if tipo_pass and not aluno_premium_admin(aluno):
+            usados = pass_usados_hoje(db, aluno.id, tipo_pass)
+            if usados >= 2:
+                item = EntradaDB(
+                    aluno_id=aluno.id,
+                    nome=aluno.nome,
+                    status="bloqueado",
+                    motivo=f"{tipo_pass} — limite diário atingido",
+                )
+                db.add(item)
+                db.commit()
+                return {
+                    "acesso": "bloqueado",
+                    "mensagem": "Você já utilizou seus 2 acessos de hoje. Tente novamente amanhã.",
+                    "ir_para_pagamento": False,
+                    "pass_tipo": tipo_pass,
+                    "usados_hoje": usados,
+                }
+            registrar_acesso_pass_automatico(db, aluno, tipo_pass, usados)
+            db.commit()
+            total_entradas = (
+                db.query(EntradaDB)
+                .filter(EntradaDB.aluno_id == aluno.id, EntradaDB.status == "liberado")
+                .count()
+            )
+            return {
+                "acesso": "liberado",
+                "mensagem": f"Acesso liberado automaticamente via {tipo_pass}. Usado {usados + 1}/2 hoje.",
+                "pass_tipo": tipo_pass,
+                "usados_hoje": usados + 1,
+                "total_entradas": total_entradas,
+                "progresso": calcular_progresso(total_entradas),
             }
 
         item = EntradaDB(
@@ -2449,7 +2613,7 @@ def registrar_entrada(aluno_id: int, body: EntradaBody = Body(...)):
 
         return {
             "acesso": "liberado",
-            "mensagem": "Acesso liberado. Bom treino!",
+            "mensagem": "Seu acesso foi liberado. Atenção: sua mensalidade está próxima do vencimento." if status_aluno == "pendente" else "Acesso liberado. Bom treino!",
             "total_entradas": total_entradas,
             "progresso": calcular_progresso(total_entradas),
         }
@@ -2461,17 +2625,31 @@ def listar_entradas():
     db = SessionLocal()
     try:
         entradas = db.query(EntradaDB).order_by(EntradaDB.data_entrada.desc()).all()
-        return [
-            {
+        saida = []
+        for e in entradas:
+            aluno = buscar_aluno_por_id(db, e.aluno_id)
+            tipo_pass = plano_pass_tipo(getattr(aluno, "plano_nome", None)) if aluno else None
+            motivo = e.motivo or ""
+            motivo_lower = motivo.lower()
+            if "total pass" in motivo_lower or "total_pass" in motivo_lower:
+                tipo_pass = "Total Pass"
+            elif "gympass" in motivo_lower:
+                tipo_pass = "Gympass"
+            usado_no_dia = pass_usados_hoje(db, e.aluno_id, tipo_pass) if tipo_pass else None
+            saida.append({
                 "id": e.id,
                 "aluno_id": e.aluno_id,
                 "nome": e.nome,
+                "cpf": getattr(aluno, "cpf", None) if aluno else None,
+                "plano_nome": getattr(aluno, "plano_nome", None) if aluno else None,
+                "tipo_pass": tipo_pass,
+                "usado_no_dia": usado_no_dia,
                 "status": e.status,
                 "motivo": e.motivo,
-                "data_entrada": e.data_entrada.isoformat(),
-            }
-            for e in entradas
-        ]
+                "observacao": (f"acesso via {tipo_pass}" if tipo_pass else e.motivo),
+                "data_entrada": e.data_entrada.isoformat() if e.data_entrada else None,
+            })
+        return saida
     finally:
         db.close()
 
@@ -2513,8 +2691,61 @@ def progresso_aluno(aluno_id: int):
         db.close()
 
 
+@app.get("/passes/entradas")
+def listar_passes_entradas(tipo: Optional[str] = Query(default=None), limite: int = Query(default=150)):
+    db = SessionLocal()
+    try:
+        query = db.query(GympassSolicitacaoDB).order_by(GympassSolicitacaoDB.criado_em.desc())
+        query = query.filter(GympassSolicitacaoDB.status == "liberado")
+        if tipo:
+            tipo_norm = plano_pass_tipo(tipo) or tipo.strip().title()
+            query = query.filter(GympassSolicitacaoDB.tipo_pass.ilike(f"%{tipo_norm}%"))
+        itens = query.limit(max(1, min(limite, 500))).all()
+        return [
+            {
+                "id": g.id,
+                "aluno_id": g.aluno_id,
+                "nome": g.nome,
+                "cpf": g.cpf,
+                "tipo_pass": getattr(g, "tipo_pass", None) or "Gympass",
+                "status": g.status,
+                "usado_no_dia": g.usado_no_dia,
+                "observacao": g.observacao,
+                "data_entrada": g.liberado_em.isoformat() if g.liberado_em else (g.criado_em.isoformat() if g.criado_em else None),
+                "criado_em": g.criado_em.isoformat() if g.criado_em else None,
+                "liberado_em": g.liberado_em.isoformat() if g.liberado_em else None,
+            }
+            for g in itens
+        ]
+    finally:
+        db.close()
+
+@app.get("/passes/notificacoes")
+def listar_passes_notificacoes(limite: int = Query(default=20)):
+    db = SessionLocal()
+    try:
+        itens = (
+            db.query(GympassSolicitacaoDB)
+            .filter(GympassSolicitacaoDB.status == "liberado")
+            .order_by(GympassSolicitacaoDB.criado_em.desc())
+            .limit(max(1, min(limite, 100)))
+            .all()
+        )
+        return [
+            {
+                "id": g.id,
+                "mensagem": f"Novo acesso {getattr(g, 'tipo_pass', None) or 'Gympass'}: {g.nome} entrou.",
+                "tipo_pass": getattr(g, "tipo_pass", None) or "Gympass",
+                "nome": g.nome,
+                "data_entrada": g.liberado_em.isoformat() if g.liberado_em else (g.criado_em.isoformat() if g.criado_em else None),
+            }
+            for g in itens
+        ]
+    finally:
+        db.close()
+
 # ----------------------
-# Gympass
+# Gympass / Total Pass legado
 # ----------------------
 @app.get("/gympass/solicitacoes")
 def listar_gympass_solicitacoes(status: Optional[str] = Query(default=None), limite: int = Query(default=100)):
@@ -2531,6 +2762,7 @@ def listar_gympass_solicitacoes(status: Optional[str] = Query(default=None), lim
                 "nome": g.nome,
                 "cpf": g.cpf,
                 "status": g.status,
+                "tipo_pass": getattr(g, "tipo_pass", None) or "Gympass",
                 "usado_no_dia": g.usado_no_dia,
                 "liberado_por_id": g.liberado_por_id,
                 "liberado_por_nome": g.liberado_por_nome,
@@ -2560,7 +2792,7 @@ def liberar_gympass_solicitacao(solicitacao_id: int, body: GympassResponderBody 
         solicitacao.status = "liberado"
         solicitacao.liberado_por_id = body.liberado_por_id
         solicitacao.liberado_por_nome = body.liberado_por_nome or "ADM/Professor"
-        solicitacao.observacao = body.observacao or "Acesso Gympass liberado manualmente"
+        solicitacao.observacao = body.observacao or "Acesso liberado manualmente (legado)"
         solicitacao.liberado_em = datetime.utcnow()
         solicitacao.atualizado_em = datetime.utcnow()
         pedido = LiberacaoCatracaDB(
@@ -2838,7 +3070,7 @@ def relatorio_planos():
     db = SessionLocal()
     try:
         alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).all()]
-        nomes = ["Mensal", "Semestral", "Anual", "Promocional", "Diária", "Gympass"]
+        nomes = ["Mensal", "Semestral", "Anual", "Promocional", "Diária", "Gympass", "Total Pass"]
         contagem = {n: 0 for n in nomes}
         for a in alunos:
             plano = (a.get("plano_nome") or "").strip().title()
