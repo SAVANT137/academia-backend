@@ -30,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 APP_TITLE = "Coliseu Fit API"
-APP_VERSION = "5.2.0"
+APP_VERSION = "5.2.3"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./coliseu_fit.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -819,6 +819,75 @@ def juros_atraso_aluno(aluno: AlunoDB) -> float:
     dias_com_juros = max(0, uteis - 3)
     return round(min(dias_com_juros, 5) * 1.0, 2)
 
+
+def aluno_deve_inativar_por_atraso(aluno: AlunoDB) -> bool:
+    """Aluno comum vira inativo após 30 dias corridos de atraso.
+    Não se aplica a Professor/Premium, Acesso Livre, Gympass ou ADM/super admin.
+    """
+    if not aluno:
+        return False
+    if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) or aluno_super_admin(aluno):
+        return False
+    plano = (getattr(aluno, "plano_nome", None) or "").strip().lower()
+    if "gympass" in plano:
+        return False
+    venc = parse_date_safe(getattr(aluno, "vencimento", None))
+    if not venc:
+        return False
+    return (hoje() - venc).days >= 30
+
+
+def processar_inativacao_por_atraso(db, aluno: AlunoDB) -> bool:
+    """Marca aluno comum como inativo e remove condições comerciais especiais.
+    Mantém histórico de pagamentos e cria um registro/auditoria em pagamentos.
+    Retorna True se mudou algo.
+    """
+    if not aluno_deve_inativar_por_atraso(aluno):
+        return False
+    if (getattr(aluno, "status_manual", "") or "").lower() == "inativo" and not beneficio_ativo_aluno(aluno):
+        return False
+
+    desconto_anterior = float(getattr(aluno, "desconto_valor", 0) or 0)
+    valor_manual_anterior = float(getattr(aluno, "valor_final_manual", 0) or 0) if getattr(aluno, "valor_final_manual", None) is not None else None
+    valor_personalizado_anterior = float(getattr(aluno, "valor_personalizado", 0) or 0) if getattr(aluno, "valor_personalizado", None) else None
+    valor_anterior = valor_cobrado_aluno(db, aluno, aluno.plano_nome)
+
+    base_atual = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, aluno.plano_nome)
+    aluno.status_manual = "inativo"
+    aluno.status_cliente_raw = "Inativo automático"
+    aluno.status_contrato_raw = "inativo_30_dias_atraso"
+    aluno.desconto_percentual = 0.0
+    aluno.desconto_valor = 0.0
+    aluno.valor_personalizado = None
+    aluno.valor_final_manual = None
+    aluno.valor_final_manual_ativo = False
+    aluno.beneficio_ativo = False
+    aluno.valor_plano = base_atual
+    aluno.valor_padrao_plano = base_atual
+    aluno.updated_at = datetime.utcnow()
+
+    auditoria = PagamentoDB(
+        aluno_id=aluno.id,
+        plano_nome=aluno.plano_nome or "Inativação",
+        valor=0.0,
+        dias=0,
+        status="inativacao_automatica",
+        origem="sistema",
+        data_pagamento=datetime.utcnow(),
+        vencimento_anterior=aluno.vencimento,
+        novo_vencimento=aluno.vencimento,
+        observacao=(
+            "Aluno inativado automaticamente após 30 dias de atraso. "
+            f"Condições especiais removidas. Desconto anterior: R$ {desconto_anterior:.2f}; "
+            f"valor manual anterior: {valor_manual_anterior}; valor personalizado anterior: {valor_personalizado_anterior}; "
+            f"valor anterior calculado: R$ {valor_anterior:.2f}."
+        ),
+        tipo_evento="inativacao_automatica",
+        valor_juros=juros_atraso_aluno(aluno),
+    )
+    db.add(auditoria)
+    return True
+
 def aluno_premium_admin(aluno: AlunoDB) -> bool:
     return bool(getattr(aluno, "premium_admin", False))
 
@@ -848,6 +917,8 @@ def obter_status_por_regras(aluno: AlunoDB) -> str:
         # pendente = faltam 3 dias ou menos, mas ainda não venceu;
         # atrasado = venceu e não pagou. O dia do vencimento ainda é válido.
         if faltam < 0:
+            if aluno_deve_inativar_por_atraso(aluno):
+                return "inativo"
             return "atrasado"
         if faltam <= 3:
             return "pendente"
@@ -1003,17 +1074,50 @@ def desconto_valor_real(db, aluno: AlunoDB, plano_nome: Optional[str] = None) ->
     return 0.0
 
 
+def valor_base_sem_juros_aluno(db, aluno: AlunoDB, plano_nome: Optional[str] = None) -> float:
+    plano_ref = plano_nome or aluno.plano_nome
+    if aluno_sem_cobranca(aluno):
+        return 0.0
+
+    if bool(getattr(aluno, "valor_final_manual_ativo", False)):
+        valor_manual = float(getattr(aluno, "valor_final_manual", 0) or 0)
+        if valor_manual >= 0:
+            return round(valor_manual, 2)
+
+    valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, plano_ref)
+    base = float(aluno.valor_plano or 0) or valor_padrao
+    desconto_reais = float(getattr(aluno, "desconto_valor", 0) or 0)
+    if desconto_reais > 0:
+        return round(max(base - desconto_reais, 0.0), 2)
+
+    valor_personalizado = float(aluno.valor_personalizado or 0)
+    if beneficio_ativo_aluno(aluno) and valor_personalizado > 0:
+        return round(valor_personalizado, 2)
+
+    desconto = float(aluno.desconto_percentual or 0)
+    desconto = max(0.0, min(100.0, desconto))
+    return round(max(base * (1 - desconto / 100.0), 0.0), 2)
+
+
 def valor_final_aluno(db, aluno: AlunoDB) -> float:
     return valor_cobrado_aluno(db, aluno, aluno.plano_nome)
 
 
 def aluno_dict(db, aluno: AlunoDB) -> dict:
+    # A leitura do aluno também garante a regra automática de inativação.
+    mudou_inativo = processar_inativacao_por_atraso(db, aluno)
+    if mudou_inativo:
+        db.commit()
+        db.refresh(aluno)
     status = obter_status_por_regras(aluno)
     premium_admin = aluno_premium_admin(aluno)
     acesso_livre = aluno_acesso_livre(aluno)
     pode_acessar_adm = aluno_super_admin(aluno)
     valor_padrao = float(aluno.valor_padrao_plano or 0) or valor_base_plano_nome(db, aluno.plano_nome)
     valor_personalizado = float(aluno.valor_personalizado or 0)
+    juros = juros_atraso_aluno(aluno)
+    valor_base_sem_juros = valor_base_sem_juros_aluno(db, aluno)
+    total_a_pagar = round(valor_base_sem_juros + juros, 2)
     beneficio_ativo = beneficio_ativo_aluno(aluno)
     venc = parse_date_safe(aluno.vencimento)
     dias_para_vencer = (venc - hoje()).days if venc else None
@@ -1051,8 +1155,11 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "pre_cadastro_origem": bool(getattr(aluno, "pre_cadastro_origem", False)),
         "desconto_percentual": desconto_percentual_real(db, aluno),
         "desconto_valor": desconto_valor_real(db, aluno),
-        "valor_final": valor_final_aluno(db, aluno),
-        "juros_atraso": juros_atraso_aluno(aluno),
+        "valor_base": valor_base_sem_juros,
+        "valor_base_sem_juros": valor_base_sem_juros,
+        "valor_final": total_a_pagar,
+        "total_a_pagar": total_a_pagar,
+        "juros_atraso": juros,
         "vencimento": aluno.vencimento,
         "data_inicio_plano": getattr(aluno, "data_inicio_plano", None),
         "dia_vencimento_fixo": getattr(aluno, "dia_vencimento_fixo", None),
@@ -1145,8 +1252,20 @@ def aplicar_pagamento_aluno(db, aluno: AlunoDB, plano_nome: str, valor: float, d
     novo_vencimento = calcular_novo_vencimento_fixo(aluno, int(plano_info["dias"]), plano_info["nome"])
 
     aluno.plano_nome = plano_info["nome"]
-    aluno.valor_padrao_plano = valor_base_plano_nome(db, plano_info["nome"])
-    aluno.valor_plano = float(valor)
+    base_oficial_plano = valor_base_plano_nome(db, plano_info["nome"])
+    aluno.valor_padrao_plano = base_oficial_plano
+    aluno.valor_plano = base_oficial_plano
+    # Se estava inativo, volta como aluno normal sem condição especial antiga.
+    if (aluno.status_manual or "").lower() == "inativo":
+        aluno.desconto_percentual = 0.0
+        aluno.desconto_valor = 0.0
+        aluno.valor_personalizado = None
+        aluno.valor_final_manual = None
+        aluno.valor_final_manual_ativo = False
+    aluno.beneficio_ativo = True
+    aluno.juros_perdoado_vencimento = None
+    aluno.juros_perdoado_em = None
+    aluno.juros_perdoado_por = None
     aluno.vencimento = novo_vencimento
     aluno.status_manual = "em_dia"
     aluno.status_cliente_raw = "Ativo"
@@ -1300,6 +1419,7 @@ def criar_aluno(body: AlunoCreate = Body(...)):
     sexo=payload_sexo,
     plano_nome=plano_normalizado,
     valor_plano=valor_plano,
+    valor_padrao_plano=valor_plano or valor_base_plano_nome(db, plano_normalizado),
     vencimento=None if payload_sem_cobranca else payload_vencimento,
     data_inicio_plano=None if payload_sem_cobranca else (payload_data_inicio or hoje_str()),
     dia_vencimento_fixo=None if payload_sem_cobranca else (payload_dia_fixo or ((parse_date_safe(payload_vencimento) or parse_date_safe(payload_data_inicio) or hoje()).day)),
@@ -1576,6 +1696,10 @@ def registrar_pagamento(aluno_id: int, body: PagamentoBody):
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
 
+        if processar_inativacao_por_atraso(db, aluno):
+            db.commit()
+            db.refresh(aluno)
+
         plano_key = (body.plano or "atual").strip().lower()
         vencimento_anterior = aluno.vencimento
 
@@ -1604,8 +1728,13 @@ def registrar_pagamento(aluno_id: int, body: PagamentoBody):
             aluno.valor_personalizado = None
             aluno.beneficio_ativo = bool(desconto_reais > 0)
 
+        juros_regularizacao = juros_atraso_aluno(aluno)
         aluno.vencimento = novo_vencimento
         aluno.status_manual = "em_dia"
+        aluno.beneficio_ativo = True
+        aluno.juros_perdoado_vencimento = None
+        aluno.juros_perdoado_em = None
+        aluno.juros_perdoado_por = None
         aluno.updated_at = datetime.utcnow()
 
         pagamento = PagamentoDB(
@@ -1618,6 +1747,7 @@ def registrar_pagamento(aluno_id: int, body: PagamentoBody):
             data_pagamento=datetime.utcnow(),
             vencimento_anterior=vencimento_anterior,
             novo_vencimento=novo_vencimento,
+            valor_juros=juros_regularizacao,
         )
         db.add(pagamento)
         db.commit()
@@ -1951,6 +2081,18 @@ def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> No
         motivo = "Acesso liberado — aluno com privilégio ADM/Premium."
     if aluno_acesso_livre(aluno) and status == "liberado":
         motivo = "Acesso livre liberado — sem mensalidade."
+
+    # Evita duplicidade quando o aluno toca várias vezes no botão em poucos segundos.
+    limite = datetime.utcnow() - timedelta(seconds=20)
+    recente = (
+        db.query(EntradaDB)
+        .filter(EntradaDB.aluno_id == aluno.id, EntradaDB.status == (status or "liberado"), EntradaDB.data_entrada >= limite)
+        .order_by(EntradaDB.data_entrada.desc())
+        .first()
+    )
+    if recente:
+        return
+
     db.add(EntradaDB(
         aluno_id=aluno.id,
         nome=aluno.nome or "Aluno",
@@ -2021,6 +2163,10 @@ def solicitar_liberacao_catraca(aluno_id: int):
         aluno = buscar_aluno_por_id(db, aluno_id)
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
+
+        if processar_inativacao_por_atraso(db, aluno):
+            db.commit()
+            db.refresh(aluno)
 
         if aluno_eh_gympass(aluno) and not aluno_premium_admin(aluno):
             usados = gympass_usados_hoje(db, aluno.id)
@@ -2101,6 +2247,8 @@ def solicitar_liberacao_catraca(aluno_id: int):
                 mensagem_existente = "Pedido já está em execução pelo agente. Empurre a catraca quando liberar."
             else:
                 mensagem_existente = "Pedido de liberação enviado. Aguarde a catraca."
+            registrar_evento_entrada(db, aluno, "liberado", "premium" if aluno_premium_admin(aluno) else ("acesso_livre" if aluno_acesso_livre(aluno) else ("pendente" if obter_status_por_regras(aluno) == "pendente" else "catraca")))
+            db.commit()
             return {
                 "ok": True,
                 "liberado": True,
@@ -2825,8 +2973,13 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
 
+        if processar_inativacao_por_atraso(db, aluno):
+            db.commit()
+            db.refresh(aluno)
+
         # Segurança: aluno renova apenas o plano atual com o valor final gravado no cadastro.
         # Ignoramos valor vindo do frontend para evitar cobrança incorreta.
+        juros_checkout = juros_atraso_aluno(aluno)
         valor_final = valor_final_aluno(db, aluno)
         valor_final = round(max(valor_final, 1.0), 2)
 
@@ -2885,6 +3038,7 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
             data_pagamento=datetime.utcnow(),
             vencimento_anterior=aluno.vencimento,
             novo_vencimento=calcular_novo_vencimento_fixo(aluno, dias_final, plano_final),
+            valor_juros=juros_checkout,
         )
         db.add(pagamento)
         db.commit()
