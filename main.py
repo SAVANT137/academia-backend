@@ -955,6 +955,80 @@ def pass_usados_hoje(db, aluno_id: int, tipo_pass: Optional[str] = None) -> int:
 def gympass_usados_hoje(db, aluno_id: int) -> int:
     return pass_usados_hoje(db, aluno_id, "gympass")
 
+def tipo_aluno_label(aluno: Optional[AlunoDB]) -> str:
+    if not aluno:
+        return "Aluno"
+    if aluno_premium_admin(aluno):
+        return "Professor/Premium"
+    if aluno_acesso_livre(aluno):
+        return "Acesso Livre"
+    tipo_pass = plano_pass_tipo(getattr(aluno, "plano_nome", None))
+    if tipo_pass:
+        return tipo_pass
+    return "Aluno comum"
+
+def tipo_acesso_label(aluno: Optional[AlunoDB], entrada: EntradaDB) -> str:
+    motivo = (getattr(entrada, "motivo", None) or "").strip()
+    motivo_lower = motivo.lower().replace("_", " ")
+    if "total pass" in motivo_lower:
+        return "Total Pass"
+    if "gympass" in motivo_lower or "gym pass" in motivo_lower:
+        return "Gympass"
+    if "acesso livre" in motivo_lower or "acesso_livre" in motivo_lower:
+        return "Acesso Livre"
+    if "premium" in motivo_lower or "professor" in motivo_lower:
+        return "Professor/Premium"
+    tipo_pass = plano_pass_tipo(getattr(aluno, "plano_nome", None)) if aluno else None
+    if tipo_pass:
+        return tipo_pass
+    if aluno and aluno_premium_admin(aluno):
+        return "Professor/Premium"
+    if aluno and aluno_acesso_livre(aluno):
+        return "Acesso Livre"
+    if motivo_lower == "pendente":
+        return "Aluno comum"
+    return "Aluno comum"
+
+def entrada_to_dict_professor(db, entrada: EntradaDB) -> dict:
+    aluno = buscar_aluno_por_id(db, entrada.aluno_id)
+    tipo_pass = plano_pass_tipo(getattr(aluno, "plano_nome", None)) if aluno else None
+    motivo = entrada.motivo or ""
+    motivo_lower = motivo.lower().replace("_", " ")
+    if "total pass" in motivo_lower:
+        tipo_pass = "Total Pass"
+    elif "gympass" in motivo_lower or "gym pass" in motivo_lower:
+        tipo_pass = "Gympass"
+    tipo_acesso = tipo_acesso_label(aluno, entrada)
+    usado_no_dia = pass_usados_hoje(db, entrada.aluno_id, tipo_pass) if tipo_pass else None
+    observacao = motivo
+    if tipo_pass:
+        observacao = f"acesso via {tipo_pass}"
+    elif tipo_acesso == "Professor/Premium":
+        observacao = "acesso via Professor/Premium"
+    elif tipo_acesso == "Acesso Livre":
+        observacao = "acesso via Acesso Livre"
+    elif motivo_lower == "pendente":
+        observacao = "acesso comum com aviso de mensalidade próxima do vencimento"
+    elif not observacao:
+        observacao = "acesso comum"
+
+    return {
+        "id": entrada.id,
+        "aluno_id": entrada.aluno_id,
+        "nome": entrada.nome,
+        "cpf": getattr(aluno, "cpf", None) if aluno else None,
+        "telefone": getattr(aluno, "telefone", None) if aluno else None,
+        "plano_nome": getattr(aluno, "plano_nome", None) if aluno else None,
+        "tipo_aluno": tipo_aluno_label(aluno),
+        "tipo_acesso": tipo_acesso,
+        "tipo_pass": tipo_pass,
+        "usado_no_dia": usado_no_dia,
+        "status": entrada.status,
+        "motivo": entrada.motivo,
+        "observacao": observacao,
+        "data_entrada": entrada.data_entrada.isoformat() if entrada.data_entrada else None,
+    }
+
 def registrar_acesso_pass_automatico(db, aluno: AlunoDB, tipo_pass: str, usados_antes: int) -> tuple[LiberacaoCatracaDB, GympassSolicitacaoDB]:
     pedido = LiberacaoCatracaDB(
         aluno_id=aluno.id,
@@ -2653,6 +2727,38 @@ def listar_entradas():
     finally:
         db.close()
 
+
+
+@app.get("/professor/{professor_id}/entradas")
+def listar_entradas_professor(
+    professor_id: int,
+    limite: int = Query(default=250),
+):
+    """
+    Consulta de acessos para professores.
+    É somente leitura: professor/premium pode acompanhar entradas, mas não altera nada.
+    Aluno comum e Acesso Livre não podem consultar esta rota.
+    """
+    db = SessionLocal()
+    try:
+        professor = buscar_aluno_por_id(db, professor_id)
+        if not professor:
+            raise HTTPException(status_code=404, detail="Professor não encontrado")
+        if not aluno_premium_admin(professor):
+            raise HTTPException(status_code=403, detail="Apenas Professor/Premium pode consultar acessos")
+        if aluno_acesso_livre(professor) and not aluno_premium_admin(professor):
+            raise HTTPException(status_code=403, detail="Acesso Livre não pode consultar acessos")
+
+        quantidade = max(1, min(int(limite or 250), 500))
+        entradas = (
+            db.query(EntradaDB)
+            .order_by(EntradaDB.data_entrada.desc())
+            .limit(quantidade)
+            .all()
+        )
+        return [entrada_to_dict_professor(db, e) for e in entradas]
+    finally:
+        db.close()
 
 @app.get("/aluno/{aluno_id}/progresso")
 def progresso_aluno(aluno_id: int):
