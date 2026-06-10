@@ -115,6 +115,17 @@ class AlunoDB(Base):
     acesso_livre = Column(Boolean, default=False)
     pode_acessar_adm = Column(Boolean, default=False)
     pode_atender_chat = Column(Boolean, default=False)
+    prof_ver_alunos = Column(Boolean, default=True)
+    prof_ver_acessos = Column(Boolean, default=True)
+    prof_ver_passes = Column(Boolean, default=True)
+    prof_ver_treinos = Column(Boolean, default=True)
+    prof_criar_treinos = Column(Boolean, default=False)
+    prof_editar_treinos = Column(Boolean, default=False)
+    prof_excluir_treinos = Column(Boolean, default=False)
+    prof_ver_telefone = Column(Boolean, default=True)
+    prof_ver_vencimento = Column(Boolean, default=True)
+    prof_ver_status_financeiro = Column(Boolean, default=True)
+    prof_ver_valores = Column(Boolean, default=False)
     juros_perdoado_vencimento = Column(String, nullable=True)
     juros_perdoado_em = Column(DateTime, nullable=True)
     juros_perdoado_por = Column(String, nullable=True)
@@ -344,6 +355,17 @@ def ensure_schema_updates():
             "acesso_livre": "ALTER TABLE alunos ADD COLUMN acesso_livre BOOLEAN DEFAULT FALSE",
             "pode_acessar_adm": "ALTER TABLE alunos ADD COLUMN pode_acessar_adm BOOLEAN DEFAULT FALSE",
             "pode_atender_chat": "ALTER TABLE alunos ADD COLUMN pode_atender_chat BOOLEAN DEFAULT FALSE",
+            "prof_ver_alunos": "ALTER TABLE alunos ADD COLUMN prof_ver_alunos BOOLEAN DEFAULT TRUE",
+            "prof_ver_acessos": "ALTER TABLE alunos ADD COLUMN prof_ver_acessos BOOLEAN DEFAULT TRUE",
+            "prof_ver_passes": "ALTER TABLE alunos ADD COLUMN prof_ver_passes BOOLEAN DEFAULT TRUE",
+            "prof_ver_treinos": "ALTER TABLE alunos ADD COLUMN prof_ver_treinos BOOLEAN DEFAULT TRUE",
+            "prof_criar_treinos": "ALTER TABLE alunos ADD COLUMN prof_criar_treinos BOOLEAN DEFAULT FALSE",
+            "prof_editar_treinos": "ALTER TABLE alunos ADD COLUMN prof_editar_treinos BOOLEAN DEFAULT FALSE",
+            "prof_excluir_treinos": "ALTER TABLE alunos ADD COLUMN prof_excluir_treinos BOOLEAN DEFAULT FALSE",
+            "prof_ver_telefone": "ALTER TABLE alunos ADD COLUMN prof_ver_telefone BOOLEAN DEFAULT TRUE",
+            "prof_ver_vencimento": "ALTER TABLE alunos ADD COLUMN prof_ver_vencimento BOOLEAN DEFAULT TRUE",
+            "prof_ver_status_financeiro": "ALTER TABLE alunos ADD COLUMN prof_ver_status_financeiro BOOLEAN DEFAULT TRUE",
+            "prof_ver_valores": "ALTER TABLE alunos ADD COLUMN prof_ver_valores BOOLEAN DEFAULT FALSE",
             "juros_perdoado_vencimento": "ALTER TABLE alunos ADD COLUMN juros_perdoado_vencimento VARCHAR(20)",
             "juros_perdoado_em": "ALTER TABLE alunos ADD COLUMN juros_perdoado_em TIMESTAMP",
             "juros_perdoado_por": "ALTER TABLE alunos ADD COLUMN juros_perdoado_por VARCHAR(120)",
@@ -678,6 +700,20 @@ class ChatMensagemBody(BaseModel):
 
 class ProfessorChatPermissaoBody(BaseModel):
     pode_atender_chat: bool
+
+class ProfessorPermissoesBody(BaseModel):
+    pode_atender_chat: Optional[bool] = None
+    prof_ver_alunos: Optional[bool] = None
+    prof_ver_acessos: Optional[bool] = None
+    prof_ver_passes: Optional[bool] = None
+    prof_ver_treinos: Optional[bool] = None
+    prof_criar_treinos: Optional[bool] = None
+    prof_editar_treinos: Optional[bool] = None
+    prof_excluir_treinos: Optional[bool] = None
+    prof_ver_telefone: Optional[bool] = None
+    prof_ver_vencimento: Optional[bool] = None
+    prof_ver_status_financeiro: Optional[bool] = None
+    prof_ver_valores: Optional[bool] = None
 
 # ----------------------
 # Helpers
@@ -1276,6 +1312,32 @@ def valor_final_aluno(db, aluno: AlunoDB) -> float:
     return valor_cobrado_aluno(db, aluno, aluno.plano_nome)
 
 
+
+def professor_permissoes_dict(aluno: AlunoDB) -> dict:
+    return {
+        "prof_ver_alunos": bool(getattr(aluno, "prof_ver_alunos", True)),
+        "prof_ver_acessos": bool(getattr(aluno, "prof_ver_acessos", True)),
+        "prof_ver_passes": bool(getattr(aluno, "prof_ver_passes", True)),
+        "pode_atender_chat": bool(getattr(aluno, "pode_atender_chat", False)),
+        "prof_ver_treinos": bool(getattr(aluno, "prof_ver_treinos", True)),
+        "prof_criar_treinos": bool(getattr(aluno, "prof_criar_treinos", False)),
+        "prof_editar_treinos": bool(getattr(aluno, "prof_editar_treinos", False)),
+        "prof_excluir_treinos": bool(getattr(aluno, "prof_excluir_treinos", False)),
+        "prof_ver_telefone": bool(getattr(aluno, "prof_ver_telefone", True)),
+        "prof_ver_vencimento": bool(getattr(aluno, "prof_ver_vencimento", True)),
+        "prof_ver_status_financeiro": bool(getattr(aluno, "prof_ver_status_financeiro", True)),
+        "prof_ver_valores": bool(getattr(aluno, "prof_ver_valores", False)),
+    }
+
+def garantir_professor(db, professor_id: int) -> AlunoDB:
+    prof = buscar_aluno_por_id(db, professor_id)
+    if not prof or not aluno_premium_admin(prof):
+        raise HTTPException(status_code=403, detail="Acesso permitido somente para Professor/Premium")
+    return prof
+
+def professor_tem_permissao(prof: AlunoDB, permissao: str, padrao: bool = True) -> bool:
+    return bool(getattr(prof, permissao, padrao))
+
 def aluno_dict(db, aluno: AlunoDB) -> dict:
     # A leitura do aluno também garante a regra automática de inativação.
     mudou_inativo = processar_inativacao_por_atraso(db, aluno)
@@ -1309,6 +1371,18 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "acesso_livre": acesso_livre,
         "pode_acessar_adm": pode_acessar_adm,
         "pode_atender_chat": bool(getattr(aluno, "pode_atender_chat", False)),
+        "prof_ver_alunos": bool(getattr(aluno, "prof_ver_alunos", True)),
+        "prof_ver_acessos": bool(getattr(aluno, "prof_ver_acessos", True)),
+        "prof_ver_passes": bool(getattr(aluno, "prof_ver_passes", True)),
+        "prof_ver_treinos": bool(getattr(aluno, "prof_ver_treinos", True)),
+        "prof_criar_treinos": bool(getattr(aluno, "prof_criar_treinos", False)),
+        "prof_editar_treinos": bool(getattr(aluno, "prof_editar_treinos", False)),
+        "prof_excluir_treinos": bool(getattr(aluno, "prof_excluir_treinos", False)),
+        "prof_ver_telefone": bool(getattr(aluno, "prof_ver_telefone", True)),
+        "prof_ver_vencimento": bool(getattr(aluno, "prof_ver_vencimento", True)),
+        "prof_ver_status_financeiro": bool(getattr(aluno, "prof_ver_status_financeiro", True)),
+        "prof_ver_valores": bool(getattr(aluno, "prof_ver_valores", False)),
+        "permissoes_professor": professor_permissoes_dict(aluno),
         "juros_perdoado_vencimento": getattr(aluno, "juros_perdoado_vencimento", None),
         "juros_perdoado_em": aluno.juros_perdoado_em.isoformat() if getattr(aluno, "juros_perdoado_em", None) else None,
         "dias_uteis_atraso": dias_uteis_atraso(getattr(aluno, "vencimento", None)),
@@ -3763,6 +3837,61 @@ def chat_professor_marcar_lidas(conversa_id: int, professor_id: int = Query(...)
         conversa.atualizada_em = now
         db.commit()
         return {"ok": True}
+    finally:
+        db.close()
+
+
+@app.get("/admin/professores-permissoes")
+def admin_professores_permissoes():
+    db = SessionLocal()
+    try:
+        professores = db.query(AlunoDB).filter(AlunoDB.premium_admin == True, or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()
+        return [aluno_dict(db, p) for p in professores]
+    finally:
+        db.close()
+
+@app.patch("/admin/professores-permissoes/{professor_id}")
+def admin_alterar_professor_permissoes(professor_id: int, body: ProfessorPermissoesBody = Body(...)):
+    db = SessionLocal()
+    try:
+        prof = buscar_aluno_por_id(db, professor_id)
+        if not prof or not aluno_premium_admin(prof):
+            raise HTTPException(status_code=404, detail="Professor/Premium não encontrado")
+        dados = body.dict(exclude_unset=True)
+        campos_permitidos = set(professor_permissoes_dict(prof).keys())
+        for key, value in dados.items():
+            if key in campos_permitidos and value is not None:
+                setattr(prof, key, bool(value))
+        prof.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(prof)
+        return {"ok": True, "professor": aluno_dict(db, prof)}
+    finally:
+        db.close()
+
+@app.get("/professor/{professor_id}/dashboard")
+def professor_dashboard(professor_id: int):
+    db = SessionLocal()
+    try:
+        prof = garantir_professor(db, professor_id)
+        inicio = datetime.combine(hoje(), datetime.min.time())
+        fim = inicio + timedelta(days=1)
+        entradas_hoje = db.query(EntradaDB).filter(EntradaDB.data_entrada >= inicio, EntradaDB.data_entrada < fim).all()
+        total = len(entradas_hoje)
+        bloqueados = len([e for e in entradas_hoje if str(e.status or "").lower() == "bloqueado"])
+        gympass = len([e for e in entradas_hoje if "gympass" in str(e.motivo or "").lower() or "gympass" in str(e.nome or "").lower()])
+        total_pass = len([e for e in entradas_hoje if "total pass" in str(e.motivo or "").lower() or "total pass" in str(e.nome or "").lower()])
+        ultimos = sorted(entradas_hoje, key=lambda e: e.data_entrada or datetime.min, reverse=True)[:8]
+        return {
+            "ok": True,
+            "professor_id": prof.id,
+            "entradas_hoje": total,
+            "gympass_hoje": gympass,
+            "total_pass_hoje": total_pass,
+            "tentativas_bloqueadas": bloqueados,
+            "ultimos_acessos": [entrada_dict(db, e) for e in ultimos] if "entrada_dict" in globals() else [],
+            "permissoes": professor_permissoes_dict(prof),
+        }
     finally:
         db.close()
 
