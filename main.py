@@ -3,6 +3,10 @@ import base64
 import os
 import re
 from datetime import date, datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 from calendar import monthrange
 from io import BytesIO
 from typing import Optional, Literal
@@ -69,6 +73,19 @@ PLANOS_FIXOS = {
     180: {"nome": "Semestral", "valor": SEMESTRAL_VALOR},
     365: {"nome": "Anual", "valor": ANUAL_VALOR},
 }
+
+BR_TZ = ZoneInfo("America/Sao_Paulo") if ZoneInfo else None
+
+def now_br() -> datetime:
+    """Horário oficial usado pelo app Coliseu Fit: Brasil/São Paulo.
+    Retorna datetime sem tzinfo para manter compatibilidade com as colunas DateTime atuais.
+    """
+    if BR_TZ:
+        return datetime.now(BR_TZ).replace(tzinfo=None)
+    return now_br() - timedelta(hours=3)
+
+def today_br() -> date:
+    return now_br().date()
 
 class ConfigDB(Base):
     __tablename__ = "configuracoes"
@@ -719,13 +736,13 @@ class ProfessorPermissoesBody(BaseModel):
 # Helpers
 # ----------------------
 def hoje() -> date:
-    return date.today()
+    return today_br()
 
 def hoje_str() -> str:
     return hoje().strftime("%Y-%m-%d")
 
 def agora_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M")
+    return now_br().strftime("%Y-%m-%d %H:%M")
 
 def get_db():
     db = SessionLocal()
@@ -925,7 +942,7 @@ def processar_inativacao_por_atraso(db, aluno: AlunoDB) -> bool:
     aluno.beneficio_ativo = False
     aluno.valor_plano = base_atual
     aluno.valor_padrao_plano = base_atual
-    aluno.updated_at = datetime.utcnow()
+    aluno.updated_at = now_br()
 
     auditoria = PagamentoDB(
         aluno_id=aluno.id,
@@ -934,7 +951,7 @@ def processar_inativacao_por_atraso(db, aluno: AlunoDB) -> bool:
         dias=0,
         status="inativacao_automatica",
         origem="sistema",
-        data_pagamento=datetime.utcnow(),
+        data_pagamento=now_br(),
         vencimento_anterior=aluno.vencimento,
         novo_vencimento=aluno.vencimento,
         observacao=(
@@ -1074,7 +1091,7 @@ def registrar_acesso_pass_automatico(db, aluno: AlunoDB, tipo_pass: str, usados_
         segundos=5,
         sentido="ambos",
         motivo=f"{tipo_pass} — liberado automaticamente",
-        atualizado_em=datetime.utcnow(),
+        atualizado_em=now_br(),
     )
     historico = GympassSolicitacaoDB(
         aluno_id=aluno.id,
@@ -1085,9 +1102,9 @@ def registrar_acesso_pass_automatico(db, aluno: AlunoDB, tipo_pass: str, usados_
         tipo_pass=tipo_pass,
         liberado_por_nome="Sistema",
         observacao=f"Acesso via {tipo_pass} liberado automaticamente",
-        criado_em=datetime.utcnow(),
-        liberado_em=datetime.utcnow(),
-        atualizado_em=datetime.utcnow(),
+        criado_em=now_br(),
+        liberado_em=now_br(),
+        atualizado_em=now_br(),
     )
     db.add(pedido)
     db.add(historico)
@@ -1520,7 +1537,7 @@ def aplicar_pagamento_aluno(db, aluno: AlunoDB, plano_nome: str, valor: float, d
     aluno.status_manual = "em_dia"
     aluno.status_cliente_raw = "Ativo"
     aluno.status_contrato_raw = "Ativo"
-    aluno.updated_at = datetime.utcnow()
+    aluno.updated_at = now_br()
     return novo_vencimento
 
 def obter_link_plano(db, plano_key: str) -> Optional[str]:
@@ -1834,7 +1851,7 @@ def atualizar_aluno_admin(aluno_id: int, body: AlunoAdminUpdate):
             aluno.pode_acessar_adm = bool(body.pode_acessar_adm)
         if not aluno.premium_admin and not aluno_acesso_livre(aluno) and not aluno_eh_pass(aluno) and not clamp_dia_vencimento(getattr(aluno, "dia_vencimento_fixo", None)):
             aluno.dia_vencimento_fixo = inferir_dia_vencimento_fixo(aluno)
-        aluno.updated_at = datetime.utcnow()
+        aluno.updated_at = now_br()
 
         db.commit()
         db.refresh(aluno)
@@ -1873,7 +1890,7 @@ def atualizar_desconto_aluno(aluno_id: int, body: DescontoBody):
             aluno.valor_padrao_plano = valor_base
             aluno.beneficio_ativo = True
 
-        aluno.updated_at = datetime.utcnow()
+        aluno.updated_at = now_br()
         db.commit()
         db.refresh(aluno)
         return {"ok": True, "message": "Desconto atualizado", "aluno": aluno_dict(db, aluno)}
@@ -1890,7 +1907,7 @@ def atualizar_aluno_self(aluno_id: int, body: AlunoSelfUpdate):
 
         aluno.nome = body.nome.strip()
         aluno.telefone = (body.telefone or "").strip() or None
-        aluno.updated_at = datetime.utcnow()
+        aluno.updated_at = now_br()
         db.commit()
         db.refresh(aluno)
         return {"ok": True, "message": "Perfil atualizado", "aluno": aluno_dict(db, aluno)}
@@ -1906,7 +1923,7 @@ def atualizar_foto_aluno(aluno_id: int, body: FotoAlunoBody):
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
         aluno.foto_url = body.foto_url
         aluno.foto_base64 = body.foto_base64
-        aluno.updated_at = datetime.utcnow()
+        aluno.updated_at = now_br()
         db.commit()
         db.refresh(aluno)
         return {"ok": True, "message": "Foto atualizada", "aluno": aluno_dict(db, aluno)}
@@ -1939,8 +1956,8 @@ def excluir_aluno(aluno_id: int):
         aluno.status_cliente_raw = "Excluído pelo ADM"
         aluno.status_contrato_raw = "excluido"
         aluno.deletado = True
-        aluno.deletado_em = datetime.utcnow()
-        aluno.updated_at = datetime.utcnow()
+        aluno.deletado_em = now_br()
+        aluno.updated_at = now_br()
         db.commit()
         return {"ok": True, "message": "Aluno removido da lista com segurança"}
     except HTTPException:
@@ -2002,7 +2019,7 @@ def registrar_pagamento(aluno_id: int, body: PagamentoBody):
         aluno.juros_perdoado_vencimento = None
         aluno.juros_perdoado_em = None
         aluno.juros_perdoado_por = None
-        aluno.updated_at = datetime.utcnow()
+        aluno.updated_at = now_br()
 
         pagamento = PagamentoDB(
             aluno_id=aluno.id,
@@ -2011,7 +2028,7 @@ def registrar_pagamento(aluno_id: int, body: PagamentoBody):
             dias=int(dias),
             status="pago",
             origem="manual_admin" if body.origem == "manual" else body.origem,
-            data_pagamento=datetime.utcnow(),
+            data_pagamento=now_br(),
             vencimento_anterior=vencimento_anterior,
             novo_vencimento=novo_vencimento,
             valor_juros=juros_regularizacao,
@@ -2354,7 +2371,7 @@ def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> No
         motivo = f"{tipo_pass} — liberado automaticamente"
 
     # Evita duplicidade quando o aluno toca várias vezes no botão em poucos segundos.
-    limite = datetime.utcnow() - timedelta(seconds=20)
+    limite = now_br() - timedelta(seconds=20)
     recente = (
         db.query(EntradaDB)
         .filter(EntradaDB.aluno_id == aluno.id, EntradaDB.status == (status or "liberado"), EntradaDB.data_entrada >= limite)
@@ -2375,7 +2392,7 @@ def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> No
 def cooldown_catraca_restante(db, aluno: AlunoDB) -> int:
     if aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) or aluno_eh_pass(aluno):
         return 0
-    limite = datetime.utcnow() - timedelta(minutes=5)
+    limite = now_br() - timedelta(minutes=5)
     ultimo = (
         db.query(EntradaDB)
         .filter(EntradaDB.aluno_id == aluno.id, EntradaDB.status == "liberado", EntradaDB.data_entrada >= limite)
@@ -2384,7 +2401,7 @@ def cooldown_catraca_restante(db, aluno: AlunoDB) -> int:
     )
     if not ultimo or not ultimo.data_entrada:
         return 0
-    restante = 300 - int((datetime.utcnow() - ultimo.data_entrada).total_seconds())
+    restante = 300 - int((now_br() - ultimo.data_entrada).total_seconds())
     return max(0, restante)
 
 
@@ -2396,7 +2413,7 @@ def reabrir_pedidos_catraca_travados(db, aluno_id: Optional[int] = None) -> int:
     o pedido pode ficar preso como em_execucao. Depois de alguns segundos,
     voltamos o pedido para pendente para o agente real conseguir pegar.
     """
-    limite = datetime.utcnow() - timedelta(seconds=CATRACA_PEDIDO_TIMEOUT_SECONDS)
+    limite = now_br() - timedelta(seconds=CATRACA_PEDIDO_TIMEOUT_SECONDS)
     query = db.query(LiberacaoCatracaDB).filter(
         LiberacaoCatracaDB.status == "em_execucao",
         LiberacaoCatracaDB.atualizado_em < limite,
@@ -2408,7 +2425,7 @@ def reabrir_pedidos_catraca_travados(db, aluno_id: Optional[int] = None) -> int:
     for pedido in pedidos:
         pedido.status = "pendente"
         pedido.motivo = "reprocessado"
-        pedido.atualizado_em = datetime.utcnow()
+        pedido.atualizado_em = now_br()
 
     if pedidos:
         db.commit()
@@ -2494,7 +2511,7 @@ def solicitar_liberacao_catraca(aluno_id: int):
                 segundos=5,
                 sentido="ambos",
                 motivo=mensagem,
-                atualizado_em=datetime.utcnow(),
+                atualizado_em=now_br(),
             )
             db.add(pedido)
             registrar_evento_entrada(db, aluno, "bloqueado", "catraca")
@@ -2544,7 +2561,7 @@ def solicitar_liberacao_catraca(aluno_id: int):
             segundos=5,
             sentido="ambos",
             motivo="app",
-            atualizado_em=datetime.utcnow(),
+            atualizado_em=now_br(),
         )
         db.add(pedido)
         registrar_evento_entrada(db, aluno, "liberado", "premium" if aluno_premium_admin(aluno) else ("acesso_livre" if aluno_acesso_livre(aluno) else ("pendente" if obter_status_por_regras(aluno) == "pendente" else "catraca")))
@@ -2587,7 +2604,7 @@ def agente_buscar_pedido_pendente(token: str = Query(default="")):
             return {"ok": True, "pedido": None}
 
         pedido.status = "em_execucao"
-        pedido.atualizado_em = datetime.utcnow()
+        pedido.atualizado_em = now_br()
         db.commit()
         db.refresh(pedido)
 
@@ -2624,8 +2641,8 @@ def confirmar_liberacao_catraca_core(pedido_id: int, sucesso: bool, erro: str, t
 
         pedido.status = "executado" if sucesso else "erro"
         pedido.erro = (erro or None)
-        pedido.executado_em = datetime.utcnow() if sucesso else None
-        pedido.atualizado_em = datetime.utcnow()
+        pedido.executado_em = now_br() if sucesso else None
+        pedido.atualizado_em = now_br()
 
         db.commit()
         db.refresh(pedido)
@@ -2973,11 +2990,11 @@ def liberar_gympass_solicitacao(solicitacao_id: int, body: GympassResponderBody 
         solicitacao.liberado_por_id = body.liberado_por_id
         solicitacao.liberado_por_nome = body.liberado_por_nome or "ADM/Professor"
         solicitacao.observacao = body.observacao or "Acesso liberado manualmente (legado)"
-        solicitacao.liberado_em = datetime.utcnow()
-        solicitacao.atualizado_em = datetime.utcnow()
+        solicitacao.liberado_em = now_br()
+        solicitacao.atualizado_em = now_br()
         pedido = LiberacaoCatracaDB(
             aluno_id=aluno.id, cpf=aluno.cpf, nome=aluno.nome, status="pendente",
-            segundos=5, sentido="ambos", motivo="gympass", atualizado_em=datetime.utcnow(),
+            segundos=5, sentido="ambos", motivo="gympass", atualizado_em=now_br(),
         )
         db.add(pedido)
         registrar_evento_entrada(db, aluno, "liberado", "gympass")
@@ -2998,7 +3015,7 @@ def negar_gympass_solicitacao(solicitacao_id: int, body: GympassResponderBody = 
         solicitacao.liberado_por_id = body.liberado_por_id
         solicitacao.liberado_por_nome = body.liberado_por_nome or "ADM/Professor"
         solicitacao.observacao = body.observacao or "Solicitação Gympass negada"
-        solicitacao.atualizado_em = datetime.utcnow()
+        solicitacao.atualizado_em = now_br()
         db.commit()
         return {"ok": True, "message": "Solicitação Gympass negada"}
     finally:
@@ -3027,9 +3044,9 @@ def reembolsar_ultimo_pagamento(aluno_id: int, body: ReembolsoBody = Body(defaul
             raise HTTPException(status_code=404, detail="Nenhum pagamento válido encontrado para reembolso")
         vencimento_atual = aluno.vencimento
         aluno.vencimento = pagamento.vencimento_anterior
-        aluno.updated_at = datetime.utcnow()
+        aluno.updated_at = now_br()
         pagamento.status = "reembolsado"
-        pagamento.reembolsado_em = datetime.utcnow()
+        pagamento.reembolsado_em = now_br()
         pagamento.observacao = body.observacao or "Reembolso registrado manualmente pelo administrador"
         registro = PagamentoDB(
             aluno_id=aluno.id,
@@ -3038,7 +3055,7 @@ def reembolsar_ultimo_pagamento(aluno_id: int, body: ReembolsoBody = Body(defaul
             dias=0,
             status="reembolso",
             origem="manual_admin_reembolso",
-            data_pagamento=datetime.utcnow(),
+            data_pagamento=now_br(),
             vencimento_anterior=vencimento_atual,
             novo_vencimento=aluno.vencimento,
             pagamento_reembolsado_id=pagamento.id,
@@ -3069,6 +3086,15 @@ def relatorio_resumo():
         potencial_atrasados = sum(float(a.get("valor_plano") or 0) for a in atrasados)
         faturamento_real = sum(float(a.get("valor_plano") or 0) for a in em_dia)
 
+        inicio = datetime.combine(hoje(), datetime.min.time())
+        fim = inicio + timedelta(days=1)
+        entradas_hoje = db.query(EntradaDB).filter(EntradaDB.data_entrada >= inicio, EntradaDB.data_entrada < fim).all()
+        bloqueados_hoje = len([e for e in entradas_hoje if str(e.status or "").lower() == "bloqueado"])
+        pagamentos_hoje = db.query(PagamentoDB).filter(PagamentoDB.data_pagamento >= inicio, PagamentoDB.data_pagamento < fim).all()
+        financeiro_hoje = sum(float(p.valor or 0) for p in pagamentos_hoje if str(p.status or "").lower() in ["pago", "confirmado", "manual"] and str(p.tipo_evento or "").lower() != "reembolso")
+        novos_cadastros = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.status == "aguardando_aprovacao").count() if "PreCadastroAlunoDB" in globals() else 0
+        mensagens_nao_lidas = db.query(ConversaChatDB).filter(ConversaChatDB.mensagens_nao_lidas_professor > 0).count() if "ConversaChatDB" in globals() else 0
+
         return {
             "total_alunos": len(lista),
             "em_dia": len(em_dia),
@@ -3077,6 +3103,11 @@ def relatorio_resumo():
             "pendentes": len(pendentes),
             "faturamento_real": faturamento_real,
             "potencial_atrasados": potencial_atrasados,
+            "entradas_hoje": len(entradas_hoje),
+            "bloqueados_hoje": bloqueados_hoje,
+            "financeiro_hoje": financeiro_hoje,
+            "novos_cadastros": novos_cadastros,
+            "mensagens_nao_lidas": mensagens_nao_lidas,
         }
     finally:
         db.close()
@@ -3400,7 +3431,7 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
         plano_final = (aluno.plano_nome or body.plano_nome or "Mensal").strip()
         dias_final = int(body.dias) if body.dias is not None else dias_por_plano(plano_final)
         valor_centavos = int(round(valor_final * 100))
-        order_nsu = f"aluno_{aluno.id}_{int(datetime.utcnow().timestamp())}"
+        order_nsu = f"aluno_{aluno.id}_{int(now_br().timestamp())}"
 
         checkout_payload = {
             "handle": INFINITEPAY_HANDLE,
@@ -3449,7 +3480,7 @@ def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends
             origem="infinitepay",
             link_pagamento=checkout_url,
             order_nsu=order_nsu,
-            data_pagamento=datetime.utcnow(),
+            data_pagamento=now_br(),
             vencimento_anterior=aluno.vencimento,
             novo_vencimento=calcular_novo_vencimento_fixo(aluno, dias_final, plano_final),
             valor_juros=juros_checkout,
@@ -3648,9 +3679,9 @@ def retirar_juros_aluno(aluno_id: int, body: RetirarJurosBody = Body(default_fac
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
         juros_atual = juros_atraso_aluno(aluno)
         aluno.juros_perdoado_vencimento = aluno.vencimento
-        aluno.juros_perdoado_em = datetime.utcnow()
+        aluno.juros_perdoado_em = now_br()
         aluno.juros_perdoado_por = body.usuario_admin or "ADM"
-        aluno.updated_at = datetime.utcnow()
+        aluno.updated_at = now_br()
         registro = PagamentoDB(
             aluno_id=aluno.id,
             plano_nome=aluno.plano_nome or "Juros",
@@ -3658,7 +3689,7 @@ def retirar_juros_aluno(aluno_id: int, body: RetirarJurosBody = Body(default_fac
             dias=0,
             status="juros_retirado",
             origem="manual_admin",
-            data_pagamento=datetime.utcnow(),
+            data_pagamento=now_br(),
             vencimento_anterior=aluno.vencimento,
             novo_vencimento=aluno.vencimento,
             observacao=body.observacao or "Juros retirado manualmente pelo administrador",
@@ -3676,7 +3707,7 @@ def get_or_create_conversa(db, aluno_id: int) -> ConversaChatDB:
     conversa = db.query(ConversaChatDB).filter(ConversaChatDB.aluno_id == aluno_id).first()
     if conversa:
         return conversa
-    conversa = ConversaChatDB(aluno_id=aluno_id, criada_em=datetime.utcnow(), atualizada_em=datetime.utcnow(), ultima_mensagem_em=datetime.utcnow())
+    conversa = ConversaChatDB(aluno_id=aluno_id, criada_em=now_br(), atualizada_em=now_br(), ultima_mensagem_em=now_br())
     db.add(conversa)
     db.commit()
     db.refresh(conversa)
@@ -3752,8 +3783,8 @@ def chat_enviar_aluno(body: ChatMensagemBody = Body(...)):
         if not msg_txt:
             raise HTTPException(status_code=400, detail="Mensagem vazia")
         conversa = get_or_create_conversa(db, aluno_id)
-        msg = MensagemChatDB(conversa_id=conversa.id, aluno_id=aluno_id, remetente_tipo="aluno", remetente_id=aluno_id, remetente_nome=aluno.nome, mensagem=msg_txt, criada_em=datetime.utcnow())
-        conversa.atualizada_em = datetime.utcnow()
+        msg = MensagemChatDB(conversa_id=conversa.id, aluno_id=aluno_id, remetente_tipo="aluno", remetente_id=aluno_id, remetente_nome=aluno.nome, mensagem=msg_txt, criada_em=now_br())
+        conversa.atualizada_em = now_br()
         conversa.ultima_mensagem_em = msg.criada_em
         conversa.mensagens_nao_lidas_professor = int(conversa.mensagens_nao_lidas_professor or 0) + 1
         db.add(msg)
@@ -3768,7 +3799,7 @@ def chat_aluno_marcar_lidas(aluno_id: int = Query(...)):
     db = SessionLocal()
     try:
         conversa = get_or_create_conversa(db, aluno_id)
-        now = datetime.utcnow()
+        now = now_br()
         db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa.id, MensagemChatDB.remetente_tipo.in_(["professor", "adm"]), MensagemChatDB.lida_em.is_(None)).update({MensagemChatDB.lida_em: now}, synchronize_session=False)
         conversa.mensagens_nao_lidas_aluno = 0
         conversa.atualizada_em = now
@@ -3812,8 +3843,8 @@ def chat_professor_responder(conversa_id: int, body: ChatMensagemBody = Body(...
         msg_txt = (body.mensagem or "").strip()
         if not msg_txt:
             raise HTTPException(status_code=400, detail="Mensagem vazia")
-        msg = MensagemChatDB(conversa_id=conversa_id, aluno_id=conversa.aluno_id, remetente_tipo="professor", remetente_id=professor_id, remetente_nome=prof.nome, mensagem=msg_txt, criada_em=datetime.utcnow())
-        conversa.atualizada_em = datetime.utcnow()
+        msg = MensagemChatDB(conversa_id=conversa_id, aluno_id=conversa.aluno_id, remetente_tipo="professor", remetente_id=professor_id, remetente_nome=prof.nome, mensagem=msg_txt, criada_em=now_br())
+        conversa.atualizada_em = now_br()
         conversa.ultima_mensagem_em = msg.criada_em
         conversa.mensagens_nao_lidas_aluno = int(conversa.mensagens_nao_lidas_aluno or 0) + 1
         db.add(msg)
@@ -3831,7 +3862,7 @@ def chat_professor_marcar_lidas(conversa_id: int, professor_id: int = Query(...)
         conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
         if not conversa:
             raise HTTPException(status_code=404, detail="Conversa não encontrada")
-        now = datetime.utcnow()
+        now = now_br()
         db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa_id, MensagemChatDB.remetente_tipo == "aluno", MensagemChatDB.lida_em.is_(None)).update({MensagemChatDB.lida_em: now}, synchronize_session=False)
         conversa.mensagens_nao_lidas_professor = 0
         conversa.atualizada_em = now
@@ -3862,7 +3893,7 @@ def admin_alterar_professor_permissoes(professor_id: int, body: ProfessorPermiss
         for key, value in dados.items():
             if key in campos_permitidos and value is not None:
                 setattr(prof, key, bool(value))
-        prof.updated_at = datetime.utcnow()
+        prof.updated_at = now_br()
         db.commit()
         db.refresh(prof)
         return {"ok": True, "professor": aluno_dict(db, prof)}
@@ -3912,7 +3943,7 @@ def admin_alterar_professor_chat(professor_id: int, body: ProfessorChatPermissao
         if not prof or not aluno_premium_admin(prof):
             raise HTTPException(status_code=404, detail="Professor/Premium não encontrado")
         prof.pode_atender_chat = bool(body.pode_atender_chat)
-        prof.updated_at = datetime.utcnow()
+        prof.updated_at = now_br()
         db.commit()
         db.refresh(prof)
         return {"ok": True, "professor": aluno_dict(db, prof)}
@@ -4025,11 +4056,11 @@ def aprovar_pre_cadastro(pre_id: int, body: PreCadastroAprovarBody):
             premium_admin=body_premium, acesso_livre=body_acesso_livre, pode_acessar_adm=bool(getattr(body, "pode_acessar_adm", False)),
             status_manual="em_dia",
             data_cadastro=agora_str(), status_cliente_raw="Ativo", status_contrato_raw="Ativo",
-            pre_cadastro_origem=True, aprovado_em=datetime.utcnow(), created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+            pre_cadastro_origem=True, aprovado_em=now_br(), created_at=now_br(), updated_at=now_br(),
         )
         db.add(aluno)
         pre.status = "aprovado"
-        pre.aprovado_em = datetime.utcnow()
+        pre.aprovado_em = now_br()
         db.commit()
         db.refresh(aluno)
         return {"ok": True, "aluno": aluno_dict(db, aluno)}
@@ -4048,7 +4079,7 @@ def recusar_pre_cadastro(pre_id: int, observacao: Optional[str] = Body(default=N
             raise HTTPException(status_code=404, detail="Pré-cadastro não encontrado")
         pre.status = "recusado"
         pre.observacao = observacao
-        pre.recusado_em = datetime.utcnow()
+        pre.recusado_em = now_br()
         db.commit()
         return {"ok": True}
     finally:
@@ -4111,7 +4142,7 @@ def criar_promocao(body: PromocaoCreate):
             base = float(aluno.valor_plano or 0) or valor_base_plano_nome(db, aluno.plano_nome)
             aluno.desconto_valor = round(min(novo_desconto, max(base, 0.0)), 2)
             aluno.origem_valor = "promocao_indicacao"
-            aluno.updated_at = datetime.utcnow()
+            aluno.updated_at = now_br()
             db.add(PromocaoAplicacaoDB(promocao_id=promo.id, aluno_id=aluno.id, valor_desconto=promo.desconto_valor, observacao="Desconto por indicação aplicado automaticamente"))
         db.commit()
         db.refresh(promo)
@@ -4144,7 +4175,7 @@ def atualizar_promocao(promocao_id: int, body: PromocaoUpdate):
             promo.ativa = bool(body.ativa)
         if body.observacao is not None:
             promo.observacao = body.observacao.strip() or None
-        promo.atualizado_em = datetime.utcnow()
+        promo.atualizado_em = now_br()
         db.commit()
         return {"ok": True, "promocao_id": promo.id}
     except Exception:
@@ -4179,7 +4210,7 @@ def alterar_status_promocao(promocao_id: int, ativa: bool = Body(..., embed=True
         if not promo:
             raise HTTPException(status_code=404, detail="Promoção não encontrada")
         promo.ativa = bool(ativa)
-        promo.atualizado_em = datetime.utcnow()
+        promo.atualizado_em = now_br()
         db.commit()
         return {"ok": True}
     finally:
@@ -4200,7 +4231,7 @@ def atualizar_valor_manual(aluno_id: int, body: ValorManualBody):
             aluno.valor_final_manual = round(max(float(body.valor_final_manual), 0.0), 2)
             aluno.valor_final_manual_ativo = True
             aluno.origem_valor = "valor_final_manual_admin"
-        aluno.updated_at = datetime.utcnow()
+        aluno.updated_at = now_br()
         db.commit()
         db.refresh(aluno)
         return aluno_dict(db, aluno)
