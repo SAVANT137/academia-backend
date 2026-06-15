@@ -173,6 +173,35 @@ class PagamentoDB(Base):
     observacao = Column(Text, nullable=True)
     tipo_evento = Column(String, nullable=True)
     valor_juros = Column(Float, default=0.0)
+    metodo_pagamento = Column(String, nullable=True)  # pix / cartao / recorrente / manual
+    gateway_payment_id = Column(String, nullable=True)
+    gateway_subscription_id = Column(String, nullable=True)
+    status_gateway = Column(String, nullable=True)
+    recorrente = Column(Boolean, default=False)
+    valor_pago = Column(Float, nullable=True)
+
+    aluno = relationship("AlunoDB")
+
+
+class AssinaturaRecorrenteDB(Base):
+    __tablename__ = "assinaturas_recorrentes"
+    id = Column(Integer, primary_key=True, index=True)
+    aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
+    gateway = Column(String, default="infinitepay")
+    gateway_customer_id = Column(String, nullable=True)
+    gateway_subscription_id = Column(String, nullable=True, index=True)
+    status = Column(String, default="pendente", index=True)  # ativa / pendente / cancelada / falhou / expirada
+    plano = Column(String, nullable=True)
+    valor = Column(Float, default=0.0)
+    ciclo = Column(String, default="mensal")
+    proxima_cobranca = Column(String, nullable=True)
+    ultimo_pagamento_id = Column(Integer, nullable=True)
+    ultimo_erro = Column(Text, nullable=True)
+    cartao_bandeira = Column(String, nullable=True)
+    cartao_ultimos4 = Column(String, nullable=True)
+    criada_em = Column(DateTime, default=now_br)
+    atualizada_em = Column(DateTime, default=now_br)
+    cancelada_em = Column(DateTime, nullable=True)
 
     aluno = relationship("AlunoDB")
 
@@ -457,7 +486,7 @@ def ensure_schema_updates():
     # conflitos de índice em bancos antigos; criamos só o que estiver faltando.
     insp = inspect(engine)
     table_names = set(insp.get_table_names())
-    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB, PreCadastroAlunoDB, PromocaoDB, PromocaoAplicacaoDB, ConversaChatDB, MensagemChatDB, AuditoriaDB, TreinoConcluidoDB, AlertaInternoDB]:
+    for model in [ConfigDB, PagamentoDB, AssinaturaRecorrenteDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB, PreCadastroAlunoDB, PromocaoDB, PromocaoAplicacaoDB, ConversaChatDB, MensagemChatDB, AuditoriaDB, TreinoConcluidoDB, AlertaInternoDB]:
         if model.__tablename__ not in table_names:
             try:
                 model.__table__.create(bind=engine, checkfirst=True)
@@ -490,6 +519,12 @@ def ensure_schema_updates():
             "observacao": "ALTER TABLE pagamentos ADD COLUMN observacao TEXT",
             "tipo_evento": "ALTER TABLE pagamentos ADD COLUMN tipo_evento VARCHAR(80)",
             "valor_juros": "ALTER TABLE pagamentos ADD COLUMN valor_juros FLOAT DEFAULT 0",
+            "metodo_pagamento": "ALTER TABLE pagamentos ADD COLUMN metodo_pagamento VARCHAR(40)",
+            "gateway_payment_id": "ALTER TABLE pagamentos ADD COLUMN gateway_payment_id VARCHAR(160)",
+            "gateway_subscription_id": "ALTER TABLE pagamentos ADD COLUMN gateway_subscription_id VARCHAR(160)",
+            "status_gateway": "ALTER TABLE pagamentos ADD COLUMN status_gateway VARCHAR(80)",
+            "recorrente": "ALTER TABLE pagamentos ADD COLUMN recorrente BOOLEAN DEFAULT FALSE",
+            "valor_pago": "ALTER TABLE pagamentos ADD COLUMN valor_pago FLOAT",
         }
 
         for col_name, cmd in expected_columns.items():
@@ -699,6 +734,15 @@ class CriarPagamentoCheckoutBody(BaseModel):
     dias: Optional[int] = None
     valor: Optional[float] = None
     plano_nome: Optional[str] = None
+
+
+class PagamentoOnlineBody(BaseModel):
+    aluno_id: int
+
+class RecorrenciaCancelarBody(BaseModel):
+    aluno_id: Optional[int] = None
+    usuario: Optional[str] = "Aluno"
+    motivo: Optional[str] = "Cancelamento solicitado pelo app"
 
 class GympassResponderBody(BaseModel):
     liberado_por_id: Optional[int] = None
@@ -1511,6 +1555,7 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
     ultimo_acesso = ultimo_acesso_aluno(db, aluno.id)
     ultimo_pagamento = ultimo_pagamento_aluno(db, aluno.id)
     progresso_mensal = aluno_progresso_mensal(db, aluno.id)
+    recorrencia_atual = assinatura_ativa_aluno(db, aluno.id) if "AssinaturaRecorrenteDB" in globals() else None
     return {
         "id": aluno.id,
         "nome": aluno.nome,
@@ -1583,6 +1628,8 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "sequencia": progresso_mensal.get("sequencia", 0),
         "meta_mensal": progresso_mensal.get("meta_mensal", 12),
         "progresso_percent": progresso_mensal.get("progresso_percent", 0),
+        "recorrencia": assinatura_dict(recorrencia_atual) if recorrencia_atual else None,
+        "recorrencia_ativa": bool(recorrencia_atual and str(recorrencia_atual.status or "").lower() == "ativa"),
     }
 
 def calcular_progresso(total_entradas: int) -> dict:
@@ -1646,6 +1693,14 @@ def pagamento_dict(p: PagamentoDB) -> dict:
         "data_pagamento": p.data_pagamento.isoformat() if p.data_pagamento else None,
         "vencimento_anterior": p.vencimento_anterior,
         "novo_vencimento": p.novo_vencimento,
+        "metodo_pagamento": getattr(p, "metodo_pagamento", None),
+        "gateway_payment_id": getattr(p, "gateway_payment_id", None),
+        "gateway_subscription_id": getattr(p, "gateway_subscription_id", None),
+        "status_gateway": getattr(p, "status_gateway", None),
+        "recorrente": bool(getattr(p, "recorrente", False)),
+        "valor_pago": float(getattr(p, "valor_pago", 0) or 0) if getattr(p, "valor_pago", None) is not None else None,
+        "observacao": getattr(p, "observacao", None),
+        "tipo_evento": getattr(p, "tipo_evento", None),
     }
 
 def aplicar_pagamento_aluno(db, aluno: AlunoDB, plano_nome: str, valor: float, dias: Optional[int] = None):
@@ -1687,6 +1742,175 @@ def aplicar_pagamento_aluno(db, aluno: AlunoDB, plano_nome: str, valor: float, d
     aluno.status_contrato_raw = "Ativo"
     aluno.updated_at = now_br()
     return novo_vencimento
+
+
+def dias_por_plano_nome(plano_nome: Optional[str]) -> int:
+    nome = (plano_nome or "Mensal").strip().lower()
+    if "anual" in nome:
+        return 365
+    if "sem" in nome:
+        return 180
+    if "di" in nome:
+        return 1
+    return 30
+
+
+def assinatura_dict(a: Optional[AssinaturaRecorrenteDB]) -> Optional[dict]:
+    if not a:
+        return None
+    return {
+        "id": a.id,
+        "aluno_id": a.aluno_id,
+        "gateway": a.gateway,
+        "gateway_customer_id": a.gateway_customer_id,
+        "gateway_subscription_id": a.gateway_subscription_id,
+        "status": a.status,
+        "plano": a.plano,
+        "valor": float(a.valor or 0),
+        "ciclo": a.ciclo,
+        "proxima_cobranca": a.proxima_cobranca,
+        "ultimo_pagamento_id": a.ultimo_pagamento_id,
+        "ultimo_erro": a.ultimo_erro,
+        "cartao_bandeira": a.cartao_bandeira,
+        "cartao_ultimos4": a.cartao_ultimos4,
+        "criada_em": a.criada_em.isoformat() if a.criada_em else None,
+        "atualizada_em": a.atualizada_em.isoformat() if a.atualizada_em else None,
+        "cancelada_em": a.cancelada_em.isoformat() if a.cancelada_em else None,
+    }
+
+
+def assinatura_ativa_aluno(db, aluno_id: int) -> Optional[AssinaturaRecorrenteDB]:
+    return (db.query(AssinaturaRecorrenteDB)
+        .filter(AssinaturaRecorrenteDB.aluno_id == aluno_id)
+        .order_by(AssinaturaRecorrenteDB.criada_em.desc())
+        .first())
+
+
+def criar_checkout_infinitepay(db, aluno: AlunoDB, metodo: str, recorrente: bool = False) -> dict:
+    """Cria checkout seguro sem confiar no valor vindo do frontend.
+
+    Observação sobre recorrência: a versão atual usa o checkout seguro da InfinitePay
+    para o primeiro pagamento e salva a estrutura de assinatura. Se a conta InfinitePay
+    tiver endpoint oficial de assinatura/tokenização, basta configurar o provedor e trocar
+    esta função para usar esse endpoint. O app NÃO salva dados brutos do cartão.
+    """
+    if aluno_sem_cobranca(aluno):
+        raise HTTPException(status_code=400, detail="Seu tipo de acesso não possui cobrança pelo app")
+
+    if processar_inativacao_por_atraso(db, aluno):
+        db.commit()
+        db.refresh(aluno)
+
+    plano_final = (aluno.plano_nome or "Mensal").strip() or "Mensal"
+    dias_final = dias_por_plano_nome(plano_final)
+    if recorrente and dias_final != 30:
+        raise HTTPException(status_code=400, detail="Cartão recorrente está disponível inicialmente apenas para plano mensal")
+
+    valor_total = round(max(valor_cobrado_aluno(db, aluno, plano_final), 0.0), 2)
+    if valor_total <= 0:
+        raise HTTPException(status_code=400, detail="Não há valor a cobrar para este aluno")
+    valor_centavos = int(round(valor_total * 100))
+    ts = int(now_br().timestamp())
+    metodo_clean = (metodo or "cartao").strip().lower()
+    order_nsu = f"{metodo_clean}_{aluno.id}_{ts}"
+
+    checkout_payload = {
+        "handle": INFINITEPAY_HANDLE,
+        "items": [
+            {
+                "name": f"Coliseu Fit - {plano_final}",
+                "description": f"{('Primeiro pagamento recorrente' if recorrente else 'Pagamento')} {plano_final}",
+                "quantity": 1,
+                "price": valor_centavos,
+            }
+        ],
+        "order_nsu": order_nsu,
+        "redirect_url": f"{PUBLIC_BASE_URL}/pagamentos/retorno",
+        "webhook_url": f"{PUBLIC_BASE_URL}/webhooks/infinitepay",
+    }
+
+    resp = requests.post(INFINITEPAY_CHECKOUT_URL, json=checkout_payload, timeout=30)
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text}
+    if resp.status_code not in (200, 201):
+        raise HTTPException(status_code=502, detail=f"InfinitePay: {data}")
+
+    checkout_url = (
+        data.get("url")
+        or data.get("checkout_url")
+        or data.get("link")
+        or data.get("payment_url")
+        or (data.get("data") or {}).get("url")
+        or (data.get("data") or {}).get("checkout_url")
+        or (data.get("invoice") or {}).get("url")
+    )
+    if not checkout_url:
+        raise HTTPException(status_code=502, detail=f"Resposta inesperada da InfinitePay: {data}")
+
+    assinatura = None
+    gateway_subscription_id = None
+    if recorrente:
+        assinatura = assinatura_ativa_aluno(db, aluno.id)
+        if not assinatura or str(assinatura.status or "").lower() in {"cancelada", "falhou", "expirada"}:
+            assinatura = AssinaturaRecorrenteDB(
+                aluno_id=aluno.id,
+                gateway="infinitepay",
+                status="pendente",
+                plano=plano_final,
+                valor=valor_total,
+                ciclo="mensal",
+                proxima_cobranca=aluno.vencimento,
+                criada_em=now_br(),
+                atualizada_em=now_br(),
+            )
+            db.add(assinatura)
+            db.flush()
+        gateway_subscription_id = assinatura.gateway_subscription_id or f"rec_{assinatura.id}_{aluno.id}"
+        assinatura.gateway_subscription_id = gateway_subscription_id
+        assinatura.status = "pendente"
+        assinatura.atualizada_em = now_br()
+
+    pagamento = PagamentoDB(
+        aluno_id=aluno.id,
+        plano_nome=plano_final,
+        valor=valor_total,
+        dias=dias_final,
+        status="pendente",
+        origem="infinitepay_recorrente" if recorrente else f"infinitepay_{metodo_clean}",
+        link_pagamento=checkout_url,
+        order_nsu=order_nsu,
+        data_pagamento=now_br(),
+        vencimento_anterior=aluno.vencimento,
+        novo_vencimento=calcular_novo_vencimento_fixo(aluno, dias_final, plano_final),
+        valor_juros=juros_atraso_aluno(aluno),
+        metodo_pagamento=("recorrente" if recorrente else metodo_clean),
+        status_gateway="checkout_criado",
+        recorrente=recorrente,
+        gateway_subscription_id=gateway_subscription_id,
+        observacao=("Primeiro pagamento de cartão recorrente. Acesso só libera após confirmação." if recorrente else f"Pagamento {metodo_clean} iniciado pelo aluno."),
+    )
+    db.add(pagamento)
+    db.commit()
+    db.refresh(pagamento)
+    if assinatura:
+        assinatura.ultimo_pagamento_id = pagamento.id
+        db.commit()
+        db.refresh(assinatura)
+
+    return {
+        "ok": True,
+        "metodo": "recorrente" if recorrente else metodo_clean,
+        "checkout_url": checkout_url,
+        "order_nsu": order_nsu,
+        "valor": valor_total,
+        "plano": plano_final,
+        "dias": dias_final,
+        "pagamento": pagamento_dict(pagamento),
+        "recorrencia": assinatura_dict(assinatura) if assinatura else None,
+        "observacao": "Dados de cartão não são salvos no app. O checkout seguro do gateway é usado para pagamento/tokenização.",
+    }
 
 def obter_link_plano(db, plano_key: str) -> Optional[str]:
     plano_key = plano_key.strip().lower()
@@ -2218,9 +2442,153 @@ def listar_pagamentos_aluno(aluno_id: int):
                 "reembolsado_em": p.reembolsado_em.isoformat() if getattr(p, "reembolsado_em", None) else None,
                 "pagamento_reembolsado_id": getattr(p, "pagamento_reembolsado_id", None),
                 "observacao": getattr(p, "observacao", None),
+                "metodo_pagamento": getattr(p, "metodo_pagamento", None),
+                "gateway_payment_id": getattr(p, "gateway_payment_id", None),
+                "gateway_subscription_id": getattr(p, "gateway_subscription_id", None),
+                "status_gateway": getattr(p, "status_gateway", None),
+                "recorrente": bool(getattr(p, "recorrente", False)),
+                "valor_pago": float(getattr(p, "valor_pago", 0) or 0) if getattr(p, "valor_pago", None) is not None else None,
             }
             for p in pagamentos
         ]
+    finally:
+        db.close()
+
+
+@app.get("/pagamentos/opcoes")
+def pagamentos_opcoes(aluno_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        if aluno_sem_cobranca(aluno):
+            return {"ok": True, "cobranca": False, "mensagem": "Seu tipo de acesso não possui cobrança pelo app.", "aluno": aluno_dict(db, aluno)}
+        valor_base = valor_base_sem_juros_aluno(db, aluno)
+        multa = juros_atraso_aluno(aluno)
+        total = valor_cobrado_aluno(db, aluno, aluno.plano_nome)
+        recorrencia = assinatura_ativa_aluno(db, aluno.id)
+        plano = (aluno.plano_nome or "Mensal").strip()
+        recorrente_disponivel = dias_por_plano_nome(plano) == 30
+        return {
+            "ok": True,
+            "cobranca": True,
+            "aluno_id": aluno.id,
+            "plano": plano,
+            "status": obter_status_por_regras(aluno),
+            "vencimento": aluno.vencimento,
+            "valor_base": valor_base,
+            "desconto": desconto_valor_real(db, aluno),
+            "multa": multa,
+            "total": total,
+            "recorrente_disponivel": recorrente_disponivel,
+            "recorrencia": assinatura_dict(recorrencia),
+            "opcoes": [
+                {"metodo": "pix", "titulo": "Pix", "descricao": "Pague agora via Pix com confirmação automática.", "valor": total},
+                {"metodo": "cartao", "titulo": "Cartão", "descricao": "Pague agora com cartão de crédito.", "valor": total},
+                {"metodo": "recorrente", "titulo": "Cartão recorrente", "descricao": "Cadastre seu cartão e renove automaticamente.", "valor": total, "disponivel": recorrente_disponivel},
+            ],
+        }
+    finally:
+        db.close()
+
+@app.post("/pagamentos/pix")
+def pagamentos_pix(body: PagamentoOnlineBody):
+    db = SessionLocal()
+    try:
+        if not body.aluno_id:
+            raise HTTPException(status_code=400, detail="Aluno não informado")
+        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        return criar_checkout_infinitepay(db, aluno, "pix", recorrente=False)
+    finally:
+        db.close()
+
+@app.post("/pagamentos/cartao")
+def pagamentos_cartao(body: PagamentoOnlineBody):
+    db = SessionLocal()
+    try:
+        if not body.aluno_id:
+            raise HTTPException(status_code=400, detail="Aluno não informado")
+        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        return criar_checkout_infinitepay(db, aluno, "cartao", recorrente=False)
+    finally:
+        db.close()
+
+@app.post("/pagamentos/recorrente/criar")
+def pagamentos_recorrente_criar(body: PagamentoOnlineBody):
+    db = SessionLocal()
+    try:
+        if not body.aluno_id:
+            raise HTTPException(status_code=400, detail="Aluno não informado")
+        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        return criar_checkout_infinitepay(db, aluno, "cartao", recorrente=True)
+    finally:
+        db.close()
+
+@app.get("/pagamentos/recorrente/status")
+def pagamentos_recorrente_status(aluno_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        return {"ok": True, "recorrencia": assinatura_dict(assinatura_ativa_aluno(db, aluno.id))}
+    finally:
+        db.close()
+
+@app.post("/pagamentos/recorrente/cancelar")
+def pagamentos_recorrente_cancelar(body: RecorrenciaCancelarBody):
+    db = SessionLocal()
+    try:
+        if not body.aluno_id:
+            raise HTTPException(status_code=400, detail="Aluno não informado")
+        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        assinatura = assinatura_ativa_aluno(db, aluno.id)
+        if not assinatura:
+            raise HTTPException(status_code=404, detail="Recorrência não encontrada")
+        assinatura.status = "cancelada"
+        assinatura.cancelada_em = now_br()
+        assinatura.atualizada_em = now_br()
+        assinatura.ultimo_erro = body.motivo
+        registrar_auditoria(db, "cancelar_recorrencia", "aluno", aluno.id, aluno.nome, None, assinatura.gateway_subscription_id, body.motivo, ator_nome=body.usuario or "Sistema")
+        db.commit()
+        return {"ok": True, "recorrencia": assinatura_dict(assinatura)}
+    finally:
+        db.close()
+
+@app.get("/admin/alunos/{aluno_id}/recorrencia")
+def admin_aluno_recorrencia(aluno_id: int):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        return {"ok": True, "aluno": aluno_dict(db, aluno), "recorrencia": assinatura_dict(assinatura_ativa_aluno(db, aluno.id))}
+    finally:
+        db.close()
+
+@app.post("/admin/alunos/{aluno_id}/recorrencia/cancelar")
+def admin_aluno_recorrencia_cancelar(aluno_id: int, body: RecorrenciaCancelarBody = Body(default_factory=RecorrenciaCancelarBody)):
+    body.aluno_id = aluno_id
+    return pagamentos_recorrente_cancelar(body)
+
+@app.post("/pagamentos/criar")
+def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody):
+    # Compatibilidade com versões antigas do Flutter. Por padrão abre checkout único de cartão/checkout geral.
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        return criar_checkout_infinitepay(db, aluno, "cartao", recorrente=False)
     finally:
         db.close()
 
@@ -2390,7 +2758,9 @@ def avisos_nao_lidos(aluno_id: int):
 def criar_treino(body: TreinoCreate):
     db = SessionLocal()
     try:
-        aluno = buscar_aluno_por_id(db, body.aluno_id)
+        if not body.aluno_id:
+            raise HTTPException(status_code=400, detail="Aluno não informado")
+        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
         treino = TreinoDB(
@@ -3212,7 +3582,9 @@ def chat_minhas_mensagens(aluno_id: int = Query(...)):
 def chat_enviar_aluno(body: ChatMensagemBody = Body(...)):
     db = SessionLocal()
     try:
-        aluno = buscar_aluno_por_id(db, body.aluno_id)
+        if not body.aluno_id:
+            raise HTTPException(status_code=400, detail="Aluno não informado")
+        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
         msg = (body.mensagem or "").strip()
@@ -3400,6 +3772,91 @@ def admin_alterar_professor_chat(professor_id: int, body: ProfessorChatPermissao
     finally:
         db.close()
 
+
+def _nested_get(data, *keys):
+    atual = data
+    for key in keys:
+        if not isinstance(atual, dict):
+            return None
+        atual = atual.get(key)
+    return atual
+
+
+def _confirmar_pagamento_online(db, pagamento: PagamentoDB, payload: dict = None):
+    aluno = buscar_aluno_por_id(db, pagamento.aluno_id)
+    if not aluno:
+        return {"ok": True, "mensagem": "Pagamento localizado, mas aluno não encontrado", "pagamento_id": pagamento.id}
+    if str(pagamento.status or "").lower() in {"aprovado", "pago", "paid", "approved", "completed", "confirmado"}:
+        return {"ok": True, "mensagem": "Pagamento já aprovado", "pagamento": pagamento_dict(pagamento), "aluno": aluno_dict(db, aluno)}
+    pagamento.status = "aprovado"
+    pagamento.status_gateway = "confirmado"
+    pagamento.valor_pago = float(pagamento.valor or 0)
+    novo_vencimento = aplicar_pagamento_aluno(db, aluno, pagamento.plano_nome, float(pagamento.valor or 0), int(pagamento.dias or 30))
+    pagamento.novo_vencimento = novo_vencimento
+    if bool(getattr(pagamento, "recorrente", False)):
+        assinatura = assinatura_ativa_aluno(db, aluno.id)
+        if assinatura:
+            assinatura.status = "ativa"
+            assinatura.valor = float(pagamento.valor or 0)
+            assinatura.plano = pagamento.plano_nome
+            assinatura.ciclo = "mensal"
+            assinatura.proxima_cobranca = novo_vencimento
+            assinatura.ultimo_pagamento_id = pagamento.id
+            assinatura.ultimo_erro = None
+            assinatura.atualizada_em = now_br()
+            pagamento.gateway_subscription_id = assinatura.gateway_subscription_id
+    registrar_auditoria(db, "pagamento_confirmado", "aluno", aluno.id, aluno.nome, pagamento.status_gateway, str(pagamento.valor), pagamento.observacao or "Pagamento confirmado via webhook/retorno", ator_tipo="sistema")
+    db.commit()
+    db.refresh(pagamento)
+    return {"ok": True, "mensagem": "Pagamento confirmado e aluno atualizado", "pagamento": pagamento_dict(pagamento), "aluno": aluno_dict(db, aluno)}
+
+
+@app.post("/webhooks/infinitepay")
+def webhook_infinitepay(body: Optional[dict] = Body(default=None)):
+    payload = body or {}
+    order_nsu = (
+        payload.get("order_nsu") or payload.get("orderNsu") or payload.get("order") or payload.get("order_id") or payload.get("external_id")
+        or _nested_get(payload, "data", "order_nsu") or _nested_get(payload, "data", "orderNsu") or _nested_get(payload, "data", "order") or _nested_get(payload, "data", "order_id") or _nested_get(payload, "data", "external_id")
+        or _nested_get(payload, "invoice", "order_nsu") or _nested_get(payload, "invoice", "orderNsu") or _nested_get(payload, "invoice", "order") or _nested_get(payload, "invoice", "order_id") or _nested_get(payload, "invoice", "external_id")
+    )
+    order_nsu = str(order_nsu or "").strip()
+    status = str(payload.get("status") or payload.get("payment_status") or payload.get("transaction_status") or _nested_get(payload, "data", "status") or _nested_get(payload, "invoice", "status") or "").lower().strip()
+    event = str(payload.get("event") or payload.get("event_name") or payload.get("type") or _nested_get(payload, "data", "event") or _nested_get(payload, "data", "type") or "").lower().strip()
+    if not order_nsu:
+        return {"ok": True, "mensagem": "Webhook sem order_nsu; nenhum pagamento alterado", "status": status or event}
+    db = SessionLocal()
+    try:
+        pagamento = db.query(PagamentoDB).filter(PagamentoDB.order_nsu == order_nsu).first()
+        if not pagamento:
+            return {"ok": True, "mensagem": "Pagamento não encontrado para este order_nsu", "order_nsu": order_nsu}
+        aprovado_status = {"paid", "approved", "completed", "success", "succeeded", "confirmed", "authorized", "captured", "paid_out"}
+        aprovado_event = {"paid", "payment.paid", "invoice.paid", "charge.paid", "checkout.paid", "transaction.paid", "transaction.approved", "payment.approved"}
+        falhou_status = {"canceled", "cancelled", "failed", "refused", "denied", "expired", "voided", "rejected"}
+        sinal_pagamento_real = bool(payload.get("transaction_id") or payload.get("transaction_nsu") or payload.get("receipt_url") or payload.get("capture_method") or _nested_get(payload, "data", "transaction_id") or _nested_get(payload, "data", "transaction_nsu") or _nested_get(payload, "transaction", "id") or _nested_get(payload, "transaction", "nsu"))
+        if status in aprovado_status or event in aprovado_event or sinal_pagamento_real:
+            return _confirmar_pagamento_online(db, pagamento, payload)
+        if status in falhou_status:
+            pagamento.status = "falhou" if bool(getattr(pagamento, "recorrente", False)) else "cancelado"
+            pagamento.status_gateway = status or event or "falhou"
+            if bool(getattr(pagamento, "recorrente", False)):
+                aluno = buscar_aluno_por_id(db, pagamento.aluno_id)
+                assinatura = assinatura_ativa_aluno(db, pagamento.aluno_id)
+                if assinatura:
+                    assinatura.status = "falhou"
+                    assinatura.ultimo_erro = status or event or "Falha de pagamento recorrente"
+                    assinatura.atualizada_em = now_br()
+                if aluno:
+                    criar_alerta(db, "recorrencia_falhou", "Pagamento recorrente falhou", "A cobrança automática não foi aprovada.", aluno=aluno, perfil="adm")
+            db.commit()
+            return {"ok": True, "mensagem": "Pagamento recusado/falhou; aluno não foi renovado", "pagamento": pagamento_dict(pagamento)}
+        return {"ok": True, "mensagem": "Webhook recebido, mas ainda sem confirmação", "status": status or event, "pagamento": pagamento_dict(pagamento)}
+    finally:
+        db.close()
+
+@app.post("/webhook/pagamentos")
+def webhook_pagamentos_alias(body: Optional[dict] = Body(default=None)):
+    return webhook_infinitepay(body)
+
 @app.get("/pagamentos/retorno")
 def retorno_pagamento_infinitepay(
     order_nsu: Optional[str] = Query(default=None),
@@ -3418,19 +3875,8 @@ def retorno_pagamento_infinitepay(
     db = SessionLocal()
     try:
         pagamento = db.query(PagamentoDB).filter(PagamentoDB.order_nsu == str(order_nsu).strip()).first()
-        if pagamento and str(pagamento.status or "").lower() not in {"aprovado", "pago", "paid", "approved", "completed"}:
-            aluno = buscar_aluno_por_id(db, pagamento.aluno_id)
-            if aluno:
-                pagamento.status = "aprovado"
-                novo_vencimento = aplicar_pagamento_aluno(
-                    db,
-                    aluno,
-                    pagamento.plano_nome,
-                    float(pagamento.valor or 0),
-                    int(pagamento.dias or 30),
-                )
-                pagamento.novo_vencimento = novo_vencimento
-                db.commit()
+        if pagamento:
+            _confirmar_pagamento_online(db, pagamento, {"order_nsu": order_nsu, "transaction_id": transaction_id, "transaction_nsu": transaction_nsu, "receipt_url": receipt_url, "capture_method": capture_method})
         return RedirectResponse(url=FRONTEND_URL)
     except Exception:
         db.rollback()
