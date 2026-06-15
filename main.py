@@ -30,6 +30,7 @@ from sqlalchemy import (
     inspect,
     text,
     or_,
+    func,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
@@ -82,7 +83,7 @@ def now_br() -> datetime:
     """
     if BR_TZ:
         return datetime.now(BR_TZ).replace(tzinfo=None)
-    return now_br() - timedelta(hours=3)
+    return datetime.utcnow() - timedelta(hours=3)
 
 def today_br() -> date:
     return now_br().date()
@@ -150,8 +151,8 @@ class AlunoDB(Base):
     deletado_em = Column(DateTime, nullable=True)
     cpf_original = Column(String, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_br)
+    updated_at = Column(DateTime, default=now_br)
 
 class PagamentoDB(Base):
     __tablename__ = "pagamentos"
@@ -164,7 +165,7 @@ class PagamentoDB(Base):
     origem = Column(String, default="manual")
     link_pagamento = Column(Text, nullable=True)
     order_nsu = Column(String, nullable=True, index=True)
-    data_pagamento = Column(DateTime, default=datetime.utcnow)
+    data_pagamento = Column(DateTime, default=now_br)
     vencimento_anterior = Column(String, nullable=True)
     novo_vencimento = Column(String, nullable=True)
     reembolsado_em = Column(DateTime, nullable=True)
@@ -181,7 +182,7 @@ class AvisoDB(Base):
     titulo = Column(String, nullable=False)
     mensagem = Column(Text, nullable=False)
     imagem_base64 = Column(Text, nullable=True)
-    data = Column(DateTime, default=datetime.utcnow)
+    data = Column(DateTime, default=now_br)
 
 class AvisoLeituraDB(Base):
     __tablename__ = "avisos_leituras"
@@ -189,7 +190,7 @@ class AvisoLeituraDB(Base):
     aviso_id = Column(Integer, ForeignKey("avisos.id"), nullable=False, index=True)
     aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
     lido = Column(Boolean, default=True)
-    data = Column(DateTime, default=datetime.utcnow)
+    data = Column(DateTime, default=now_br)
 
 class TreinoDB(Base):
     __tablename__ = "treinos"
@@ -209,7 +210,7 @@ class EntradaDB(Base):
     nome = Column(Text, nullable=False)
     status = Column(Text, nullable=False)  # liberado / bloqueado
     motivo = Column(Text, nullable=False)
-    data_entrada = Column(DateTime, default=datetime.utcnow)
+    data_entrada = Column(DateTime, default=now_br)
 
 
 class LiberacaoCatracaDB(Base):
@@ -228,9 +229,9 @@ class LiberacaoCatracaDB(Base):
     motivo = Column(Text, nullable=True)
     erro = Column(Text, nullable=True)
 
-    criado_em = Column(DateTime, default=datetime.utcnow)
+    criado_em = Column(DateTime, default=now_br)
     executado_em = Column(DateTime, nullable=True)
-    atualizado_em = Column(DateTime, default=datetime.utcnow)
+    atualizado_em = Column(DateTime, default=now_br)
 
     aluno = relationship("AlunoDB")
 
@@ -249,9 +250,9 @@ class GympassSolicitacaoDB(Base):
     liberado_por_id = Column(Integer, nullable=True)
     liberado_por_nome = Column(Text, nullable=True)
     observacao = Column(Text, nullable=True)
-    criado_em = Column(DateTime, default=datetime.utcnow, index=True)
+    criado_em = Column(DateTime, default=now_br, index=True)
     liberado_em = Column(DateTime, nullable=True)
-    atualizado_em = Column(DateTime, default=datetime.utcnow)
+    atualizado_em = Column(DateTime, default=now_br)
 
     aluno = relationship("AlunoDB")
 
@@ -265,7 +266,7 @@ class PreCadastroAlunoDB(Base):
     cpf = Column(String, unique=True, nullable=False, index=True)
     status = Column(String, default="aguardando_aprovacao", index=True)
     observacao = Column(Text, nullable=True)
-    criado_em = Column(DateTime, default=datetime.utcnow, index=True)
+    criado_em = Column(DateTime, default=now_br, index=True)
     aprovado_em = Column(DateTime, nullable=True)
     recusado_em = Column(DateTime, nullable=True)
 
@@ -280,8 +281,8 @@ class PromocaoDB(Base):
     desconto_valor = Column(Float, default=0.0)
     ativa = Column(Boolean, default=True, index=True)
     observacao = Column(Text, nullable=True)
-    criado_em = Column(DateTime, default=datetime.utcnow, index=True)
-    atualizado_em = Column(DateTime, default=datetime.utcnow)
+    criado_em = Column(DateTime, default=now_br, index=True)
+    atualizado_em = Column(DateTime, default=now_br)
 
 
 class PromocaoAplicacaoDB(Base):
@@ -292,7 +293,7 @@ class PromocaoAplicacaoDB(Base):
     aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
     valor_desconto = Column(Float, default=0.0)
     observacao = Column(Text, nullable=True)
-    criado_em = Column(DateTime, default=datetime.utcnow, index=True)
+    criado_em = Column(DateTime, default=now_br, index=True)
 
     promocao = relationship("PromocaoDB")
     aluno = relationship("AlunoDB")
@@ -303,8 +304,8 @@ class ConversaChatDB(Base):
     __tablename__ = "conversas_chat"
     id = Column(Integer, primary_key=True, index=True)
     aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
-    criada_em = Column(DateTime, default=datetime.utcnow)
-    atualizada_em = Column(DateTime, default=datetime.utcnow)
+    criada_em = Column(DateTime, default=now_br)
+    atualizada_em = Column(DateTime, default=now_br)
     ultima_mensagem_em = Column(DateTime, nullable=True)
     status = Column(String, default="aberta")
     mensagens_nao_lidas_professor = Column(Integer, default=0)
@@ -320,10 +321,53 @@ class MensagemChatDB(Base):
     remetente_id = Column(Integer, nullable=True)
     remetente_nome = Column(String, nullable=True)
     mensagem = Column(Text, nullable=False)
-    criada_em = Column(DateTime, default=datetime.utcnow)
+    criada_em = Column(DateTime, default=now_br)
     lida_em = Column(DateTime, nullable=True)
     status = Column(String, default="enviada")
     conversa = relationship("ConversaChatDB")
+
+
+class AuditoriaDB(Base):
+    __tablename__ = "auditoria"
+    id = Column(Integer, primary_key=True, index=True)
+    ator_id = Column(Integer, nullable=True, index=True)
+    ator_nome = Column(String, nullable=True)
+    ator_tipo = Column(String, default="adm")
+    acao = Column(String, nullable=False, index=True)
+    alvo_tipo = Column(String, nullable=True, index=True)
+    alvo_id = Column(Integer, nullable=True, index=True)
+    alvo_nome = Column(String, nullable=True)
+    valor_antigo = Column(Text, nullable=True)
+    valor_novo = Column(Text, nullable=True)
+    observacao = Column(Text, nullable=True)
+    criado_em = Column(DateTime, default=now_br, index=True)
+
+
+class TreinoConcluidoDB(Base):
+    __tablename__ = "treinos_concluidos"
+    id = Column(Integer, primary_key=True, index=True)
+    aluno_id = Column(Integer, ForeignKey("alunos.id"), nullable=False, index=True)
+    treino_id = Column(Integer, ForeignKey("treinos.id"), nullable=True, index=True)
+    categoria = Column(String, nullable=True)
+    titulo = Column(String, nullable=True)
+    observacao = Column(Text, nullable=True)
+    concluido_em = Column(DateTime, default=now_br, index=True)
+    aluno = relationship("AlunoDB")
+    treino = relationship("TreinoDB")
+
+
+class AlertaInternoDB(Base):
+    __tablename__ = "alertas_internos"
+    id = Column(Integer, primary_key=True, index=True)
+    perfil = Column(String, default="adm", index=True)  # adm / professor / todos
+    tipo = Column(String, nullable=False, index=True)
+    titulo = Column(String, nullable=False)
+    mensagem = Column(Text, nullable=True)
+    aluno_id = Column(Integer, nullable=True, index=True)
+    aluno_nome = Column(String, nullable=True)
+    status = Column(String, default="novo", index=True)
+    criado_em = Column(DateTime, default=now_br, index=True)
+    lido_em = Column(DateTime, nullable=True)
 
 def ensure_schema_updates():
     """
@@ -413,7 +457,7 @@ def ensure_schema_updates():
     # conflitos de índice em bancos antigos; criamos só o que estiver faltando.
     insp = inspect(engine)
     table_names = set(insp.get_table_names())
-    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB, PreCadastroAlunoDB, PromocaoDB, PromocaoAplicacaoDB, ConversaChatDB, MensagemChatDB]:
+    for model in [ConfigDB, PagamentoDB, AvisoDB, AvisoLeituraDB, TreinoDB, EntradaDB, LiberacaoCatracaDB, GympassSolicitacaoDB, PreCadastroAlunoDB, PromocaoDB, PromocaoAplicacaoDB, ConversaChatDB, MensagemChatDB, AuditoriaDB, TreinoConcluidoDB, AlertaInternoDB]:
         if model.__tablename__ not in table_names:
             try:
                 model.__table__.create(bind=engine, checkfirst=True)
@@ -1355,6 +1399,96 @@ def garantir_professor(db, professor_id: int) -> AlunoDB:
 def professor_tem_permissao(prof: AlunoDB, permissao: str, padrao: bool = True) -> bool:
     return bool(getattr(prof, permissao, padrao))
 
+
+
+def mes_atual_intervalo_br() -> tuple[datetime, datetime]:
+    agora = now_br()
+    inicio = datetime(agora.year, agora.month, 1)
+    if agora.month == 12:
+        fim = datetime(agora.year + 1, 1, 1)
+    else:
+        fim = datetime(agora.year, agora.month + 1, 1)
+    return inicio, fim
+
+def ultimo_acesso_aluno(db, aluno_id: int) -> Optional[EntradaDB]:
+    return (db.query(EntradaDB)
+        .filter(EntradaDB.aluno_id == aluno_id)
+        .order_by(EntradaDB.data_entrada.desc())
+        .first())
+
+def ultimo_pagamento_aluno(db, aluno_id: int) -> Optional[PagamentoDB]:
+    return (db.query(PagamentoDB)
+        .filter(PagamentoDB.aluno_id == aluno_id)
+        .order_by(PagamentoDB.data_pagamento.desc())
+        .first())
+
+def aluno_progresso_mensal(db, aluno_id: int, meta: int = 12) -> dict:
+    inicio, fim = mes_atual_intervalo_br()
+    acessos_mes = db.query(EntradaDB).filter(
+        EntradaDB.aluno_id == aluno_id,
+        EntradaDB.status == "liberado",
+        EntradaDB.data_entrada >= inicio,
+        EntradaDB.data_entrada < fim,
+    ).count()
+    treinos_mes = 0
+    try:
+        treinos_mes = db.query(TreinoConcluidoDB).filter(
+            TreinoConcluidoDB.aluno_id == aluno_id,
+            TreinoConcluidoDB.concluido_em >= inicio,
+            TreinoConcluidoDB.concluido_em < fim,
+        ).count()
+    except Exception:
+        treinos_mes = 0
+    total_mes = max(acessos_mes, treinos_mes)
+    dias = (db.query(func.date(EntradaDB.data_entrada))
+        .filter(EntradaDB.aluno_id == aluno_id, EntradaDB.status == "liberado")
+        .group_by(func.date(EntradaDB.data_entrada))
+        .all())
+    datas = {d[0] for d in dias if d and d[0]}
+    seq = 0
+    dia = today_br()
+    while dia in datas:
+        seq += 1
+        dia = dia - timedelta(days=1)
+    percent = round(min(total_mes / max(meta, 1), 1.0), 3)
+    prog = calcular_progresso(total_mes)
+    return {
+        "total_entradas": total_mes,
+        "acessos_no_mes": acessos_mes,
+        "treinos_concluidos_mes": treinos_mes,
+        "sequencia": seq,
+        "meta_mensal": meta,
+        "progresso_percent": percent,
+        **prog,
+    }
+
+def registrar_auditoria(db, acao: str, alvo_tipo: str = None, alvo_id: int = None, alvo_nome: str = None, valor_antigo: str = None, valor_novo: str = None, observacao: str = None, ator_id: int = None, ator_nome: str = "Sistema", ator_tipo: str = "sistema") -> None:
+    try:
+        db.add(AuditoriaDB(ator_id=ator_id, ator_nome=ator_nome, ator_tipo=ator_tipo, acao=acao, alvo_tipo=alvo_tipo, alvo_id=alvo_id, alvo_nome=alvo_nome, valor_antigo=valor_antigo, valor_novo=valor_novo, observacao=observacao))
+    except Exception:
+        pass
+
+def criar_alerta(db, tipo: str, titulo: str, mensagem: str = None, aluno: Optional[AlunoDB] = None, perfil: str = "adm") -> None:
+    try:
+        db.add(AlertaInternoDB(perfil=perfil, tipo=tipo, titulo=titulo, mensagem=mensagem, aluno_id=getattr(aluno, 'id', None), aluno_nome=getattr(aluno, 'nome', None)))
+    except Exception:
+        pass
+
+def aluno_dict_professor(db, aluno: AlunoDB, prof: AlunoDB) -> dict:
+    d = aluno_dict(db, aluno)
+    if not professor_tem_permissao(prof, "prof_ver_telefone", True):
+        d["telefone"] = None
+    if not professor_tem_permissao(prof, "prof_ver_vencimento", True):
+        d["vencimento"] = None
+        d["dias_para_vencer"] = None
+    if not professor_tem_permissao(prof, "prof_ver_status_financeiro", True):
+        d["status"] = "restrito"
+        d["status_manual"] = "restrito"
+    if not professor_tem_permissao(prof, "prof_ver_valores", False):
+        for k in ["valor_plano", "valor_final", "total_a_pagar", "valor_base", "valor_base_sem_juros", "valor_personalizado", "valor_final_manual", "desconto_valor", "desconto_percentual", "juros_atraso", "multa_atraso"]:
+            d[k] = None
+    return d
+
 def aluno_dict(db, aluno: AlunoDB) -> dict:
     # A leitura do aluno também garante a regra automática de inativação.
     mudou_inativo = processar_inativacao_por_atraso(db, aluno)
@@ -1374,6 +1508,9 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
     venc = parse_date_safe(aluno.vencimento)
     dias_para_vencer = (venc - hoje()).days if venc else None
     dias_pendentes_restantes = max(0, int(dias_para_vencer or 0)) if status == "pendente" else 0
+    ultimo_acesso = ultimo_acesso_aluno(db, aluno.id)
+    ultimo_pagamento = ultimo_pagamento_aluno(db, aluno.id)
+    progresso_mensal = aluno_progresso_mensal(db, aluno.id)
     return {
         "id": aluno.id,
         "nome": aluno.nome,
@@ -1435,6 +1572,17 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "data_cadastro": aluno.data_cadastro,
         "status_cliente_raw": aluno.status_cliente_raw,
         "status_contrato_raw": aluno.status_contrato_raw,
+        "ultimo_acesso": ultimo_acesso.data_entrada.isoformat() if ultimo_acesso and ultimo_acesso.data_entrada else None,
+        "ultimo_acesso_status": ultimo_acesso.status if ultimo_acesso else None,
+        "ultimo_pagamento": ultimo_pagamento.data_pagamento.isoformat() if ultimo_pagamento and ultimo_pagamento.data_pagamento else None,
+        "ultimo_pagamento_valor": float(ultimo_pagamento.valor or 0) if ultimo_pagamento else None,
+        "progresso_mensal": progresso_mensal,
+        "total_entradas": progresso_mensal.get("total_entradas", 0),
+        "acessos_no_mes": progresso_mensal.get("acessos_no_mes", 0),
+        "treinos_concluidos_mes": progresso_mensal.get("treinos_concluidos_mes", 0),
+        "sequencia": progresso_mensal.get("sequencia", 0),
+        "meta_mensal": progresso_mensal.get("meta_mensal", 12),
+        "progresso_percent": progresso_mensal.get("progresso_percent", 0),
     }
 
 def calcular_progresso(total_entradas: int) -> dict:
@@ -2386,7 +2534,10 @@ def registrar_evento_entrada(db, aluno: AlunoDB, status: str, motivo: str) -> No
         nome=aluno.nome or "Aluno",
         status=(status or "liberado"),
         motivo=(motivo or "catraca"),
+        data_entrada=now_br(),
     ))
+    if (status or "").lower() == "bloqueado":
+        criar_alerta(db, "acesso_bloqueado", f"{aluno.nome} tentou acessar bloqueado", motivo, aluno, perfil="todos")
 
 
 def cooldown_catraca_restante(db, aluno: AlunoDB) -> int:
@@ -2839,6 +2990,8 @@ def listar_entradas_professor(
             raise HTTPException(status_code=403, detail="Apenas Professor/Premium pode consultar acessos")
         if aluno_acesso_livre(professor) and not aluno_premium_admin(professor):
             raise HTTPException(status_code=403, detail="Acesso Livre não pode consultar acessos")
+        if not professor_tem_permissao(professor, "prof_ver_acessos", True):
+            raise HTTPException(status_code=403, detail="Professor sem permissão para ver acessos")
 
         quantidade = max(1, min(int(limite or 250), 500))
         entradas = (
@@ -2858,1016 +3011,75 @@ def progresso_aluno(aluno_id: int):
         aluno = buscar_aluno_por_id(db, aluno_id)
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        total = (
-            db.query(EntradaDB)
-            .filter(EntradaDB.aluno_id == aluno.id, EntradaDB.status == "liberado")
-            .count()
-        )
-        prog = calcular_progresso(total)
-        metas = [10, 25, 50, 100, 200]
-        proxima = prog.get("proxima_meta", 10)
-        anterior = 0
-        for meta in metas:
-            if total < meta:
-                proxima = meta
-                break
-            anterior = meta
-        span = max(proxima - anterior, 1)
-        percent = max(0, min(100, int(((total - anterior) / span) * 100)))
-        return {
-            "total_entradas": total,
-            "nivel": prog.get("nivel"),
-            "cor": prog.get("cor"),
-            "titulo": "ADM/Premium" if aluno_premium_admin(aluno) else prog.get("nivel", "Começando").title(),
-            "mensagem": "Acesso vitalício com privilégio ADM/Premium." if aluno_premium_admin(aluno) else prog.get("mensagem"),
-            "proxima_meta": proxima,
-            "metas": metas,
-            "progresso_percent": percent,
-        }
+        progresso = aluno_progresso_mensal(db, aluno.id)
+        ultimo = ultimo_acesso_aluno(db, aluno.id)
+        progresso["ultimo_acesso"] = ultimo.data_entrada.isoformat() if ultimo and ultimo.data_entrada else None
+        return progresso
     finally:
         db.close()
 
 
-@app.get("/passes/entradas")
-def listar_passes_entradas(tipo: Optional[str] = Query(default=None), limite: int = Query(default=150)):
+@app.get("/professor/{professor_id}/alunos")
+def professor_listar_alunos(professor_id: int):
     db = SessionLocal()
     try:
-        query = db.query(GympassSolicitacaoDB).order_by(GympassSolicitacaoDB.criado_em.desc())
-        query = query.filter(GympassSolicitacaoDB.status == "liberado")
-        if tipo:
-            tipo_norm = plano_pass_tipo(tipo) or tipo.strip().title()
-            query = query.filter(GympassSolicitacaoDB.tipo_pass.ilike(f"%{tipo_norm}%"))
-        itens = query.limit(max(1, min(limite, 500))).all()
-        return [
-            {
-                "id": g.id,
-                "aluno_id": g.aluno_id,
-                "nome": g.nome,
-                "cpf": g.cpf,
-                "tipo_pass": getattr(g, "tipo_pass", None) or "Gympass",
-                "status": g.status,
-                "usado_no_dia": g.usado_no_dia,
-                "observacao": g.observacao,
-                "data_entrada": g.liberado_em.isoformat() if g.liberado_em else (g.criado_em.isoformat() if g.criado_em else None),
-                "criado_em": g.criado_em.isoformat() if g.criado_em else None,
-                "liberado_em": g.liberado_em.isoformat() if g.liberado_em else None,
-            }
-            for g in itens
-        ]
+        prof = garantir_professor(db, professor_id)
+        if not professor_tem_permissao(prof, "prof_ver_alunos", True):
+            raise HTTPException(status_code=403, detail="Professor sem permissão para ver alunos")
+        alunos = db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()
+        return [aluno_dict_professor(db, a, prof) for a in alunos]
     finally:
         db.close()
 
-@app.get("/passes/notificacoes")
-def listar_passes_notificacoes(limite: int = Query(default=20)):
-    db = SessionLocal()
-    try:
-        itens = (
-            db.query(GympassSolicitacaoDB)
-            .filter(GympassSolicitacaoDB.status == "liberado")
-            .order_by(GympassSolicitacaoDB.criado_em.desc())
-            .limit(max(1, min(limite, 100)))
-            .all()
-        )
-        return [
-            {
-                "id": g.id,
-                "mensagem": f"Novo acesso {getattr(g, 'tipo_pass', None) or 'Gympass'}: {g.nome} entrou.",
-                "tipo_pass": getattr(g, "tipo_pass", None) or "Gympass",
-                "nome": g.nome,
-                "data_entrada": g.liberado_em.isoformat() if g.liberado_em else (g.criado_em.isoformat() if g.criado_em else None),
-            }
-            for g in itens
-        ]
-    finally:
-        db.close()
 
-# ----------------------
-# Gympass / Total Pass legado
-# ----------------------
-@app.get("/gympass/solicitacoes")
-def listar_gympass_solicitacoes(status: Optional[str] = Query(default=None), limite: int = Query(default=100)):
-    db = SessionLocal()
-    try:
-        query = db.query(GympassSolicitacaoDB).order_by(GympassSolicitacaoDB.criado_em.desc())
-        if status:
-            query = query.filter(GympassSolicitacaoDB.status == status.strip().lower())
-        itens = query.limit(max(1, min(limite, 300))).all()
-        return [
-            {
-                "id": g.id,
-                "aluno_id": g.aluno_id,
-                "nome": g.nome,
-                "cpf": g.cpf,
-                "status": g.status,
-                "tipo_pass": getattr(g, "tipo_pass", None) or "Gympass",
-                "usado_no_dia": g.usado_no_dia,
-                "liberado_por_id": g.liberado_por_id,
-                "liberado_por_nome": g.liberado_por_nome,
-                "observacao": g.observacao,
-                "criado_em": g.criado_em.isoformat() if g.criado_em else None,
-                "liberado_em": g.liberado_em.isoformat() if g.liberado_em else None,
-            }
-            for g in itens
-        ]
-    finally:
-        db.close()
-
-@app.post("/gympass/solicitacoes/{solicitacao_id}/liberar")
-def liberar_gympass_solicitacao(solicitacao_id: int, body: GympassResponderBody = Body(default=GympassResponderBody())):
-    db = SessionLocal()
-    try:
-        solicitacao = db.query(GympassSolicitacaoDB).filter(GympassSolicitacaoDB.id == solicitacao_id).first()
-        if not solicitacao:
-            raise HTTPException(status_code=404, detail="Solicitação Gympass não encontrada")
-        if solicitacao.status == "liberado":
-            return {"ok": True, "message": "Solicitação já liberada"}
-        if solicitacao.status == "negado":
-            raise HTTPException(status_code=400, detail="Solicitação já foi negada")
-        aluno = buscar_aluno_por_id(db, solicitacao.aluno_id)
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        solicitacao.status = "liberado"
-        solicitacao.liberado_por_id = body.liberado_por_id
-        solicitacao.liberado_por_nome = body.liberado_por_nome or "ADM/Professor"
-        solicitacao.observacao = body.observacao or "Acesso liberado manualmente (legado)"
-        solicitacao.liberado_em = now_br()
-        solicitacao.atualizado_em = now_br()
-        pedido = LiberacaoCatracaDB(
-            aluno_id=aluno.id, cpf=aluno.cpf, nome=aluno.nome, status="pendente",
-            segundos=5, sentido="ambos", motivo="gympass", atualizado_em=now_br(),
-        )
-        db.add(pedido)
-        registrar_evento_entrada(db, aluno, "liberado", "gympass")
-        db.commit()
-        db.refresh(pedido)
-        return {"ok": True, "message": "Acesso Gympass liberado", "pedido_id": pedido.id}
-    finally:
-        db.close()
-
-@app.post("/gympass/solicitacoes/{solicitacao_id}/negar")
-def negar_gympass_solicitacao(solicitacao_id: int, body: GympassResponderBody = Body(default=GympassResponderBody())):
-    db = SessionLocal()
-    try:
-        solicitacao = db.query(GympassSolicitacaoDB).filter(GympassSolicitacaoDB.id == solicitacao_id).first()
-        if not solicitacao:
-            raise HTTPException(status_code=404, detail="Solicitação Gympass não encontrada")
-        solicitacao.status = "negado"
-        solicitacao.liberado_por_id = body.liberado_por_id
-        solicitacao.liberado_por_nome = body.liberado_por_nome or "ADM/Professor"
-        solicitacao.observacao = body.observacao or "Solicitação Gympass negada"
-        solicitacao.atualizado_em = now_br()
-        db.commit()
-        return {"ok": True, "message": "Solicitação Gympass negada"}
-    finally:
-        db.close()
-
-# ----------------------
-# Reembolso manual
-# ----------------------
-@app.post("/pagamentos/reembolso/{aluno_id}")
-def reembolsar_ultimo_pagamento(aluno_id: int, body: ReembolsoBody = Body(default=ReembolsoBody())):
+@app.get("/alunos/{aluno_id}/acessos")
+def aluno_acessos(aluno_id: int, limite: int = Query(default=100)):
     db = SessionLocal()
     try:
         aluno = buscar_aluno_por_id(db, aluno_id)
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        pagamento = (
-            db.query(PagamentoDB)
-            .filter(
-                PagamentoDB.aluno_id == aluno.id,
-                PagamentoDB.status.in_(["pago", "aprovado"]),
-            )
-            .order_by(PagamentoDB.data_pagamento.desc(), PagamentoDB.id.desc())
-            .first()
-        )
-        if not pagamento:
-            raise HTTPException(status_code=404, detail="Nenhum pagamento válido encontrado para reembolso")
-        vencimento_atual = aluno.vencimento
-        aluno.vencimento = pagamento.vencimento_anterior
-        aluno.updated_at = now_br()
-        pagamento.status = "reembolsado"
-        pagamento.reembolsado_em = now_br()
-        pagamento.observacao = body.observacao or "Reembolso registrado manualmente pelo administrador"
-        registro = PagamentoDB(
-            aluno_id=aluno.id,
-            plano_nome=pagamento.plano_nome,
-            valor=-abs(float(pagamento.valor or 0)),
-            dias=0,
-            status="reembolso",
-            origem="manual_admin_reembolso",
-            data_pagamento=now_br(),
-            vencimento_anterior=vencimento_atual,
-            novo_vencimento=aluno.vencimento,
-            pagamento_reembolsado_id=pagamento.id,
-            observacao=f"Reembolso do pagamento #{pagamento.id}. {body.observacao or ''}".strip(),
-        )
-        db.add(registro)
-        db.commit()
-        db.refresh(aluno)
-        return {"ok": True, "message": "Reembolso registrado", "aluno": aluno_dict(db, aluno), "pagamento_reembolsado": pagamento_dict(pagamento)}
-    finally:
-        db.close()
-
-# ----------------------
-# Relatórios
-# ----------------------
-@app.get("/relatorio/resumo")
-def relatorio_resumo():
-    db = SessionLocal()
-    try:
-        alunos = db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).all()
-        lista = [aluno_dict(db, a) for a in alunos]
-
-        em_dia = [a for a in lista if a["status"] == "em_dia"]
-        atrasados = [a for a in lista if a["status"] == "atrasado"]
-        inativos = [a for a in lista if a["status"] == "inativo"]
-        pendentes = [a for a in lista if a["status"] == "pendente"]
-
-        potencial_atrasados = sum(float(a.get("valor_plano") or 0) for a in atrasados)
-        faturamento_real = sum(float(a.get("valor_plano") or 0) for a in em_dia)
-
-        inicio = datetime.combine(hoje(), datetime.min.time())
-        fim = inicio + timedelta(days=1)
-        entradas_hoje = db.query(EntradaDB).filter(EntradaDB.data_entrada >= inicio, EntradaDB.data_entrada < fim).all()
-        bloqueados_hoje = len([e for e in entradas_hoje if str(e.status or "").lower() == "bloqueado"])
-        pagamentos_hoje = db.query(PagamentoDB).filter(PagamentoDB.data_pagamento >= inicio, PagamentoDB.data_pagamento < fim).all()
-        financeiro_hoje = sum(float(p.valor or 0) for p in pagamentos_hoje if str(p.status or "").lower() in ["pago", "confirmado", "manual"] and str(p.tipo_evento or "").lower() != "reembolso")
-        novos_cadastros = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.status == "aguardando_aprovacao").count() if "PreCadastroAlunoDB" in globals() else 0
-        mensagens_nao_lidas = db.query(ConversaChatDB).filter(ConversaChatDB.mensagens_nao_lidas_professor > 0).count() if "ConversaChatDB" in globals() else 0
-
-        return {
-            "total_alunos": len(lista),
-            "em_dia": len(em_dia),
-            "atrasados": len(atrasados),
-            "inativos": len(inativos),
-            "pendentes": len(pendentes),
-            "faturamento_real": faturamento_real,
-            "potencial_atrasados": potencial_atrasados,
-            "entradas_hoje": len(entradas_hoje),
-            "bloqueados_hoje": bloqueados_hoje,
-            "financeiro_hoje": financeiro_hoje,
-            "novos_cadastros": novos_cadastros,
-            "mensagens_nao_lidas": mensagens_nao_lidas,
-        }
-    finally:
-        db.close()
-
-@app.get("/relatorio/texto/{tipo}")
-def relatorio_texto(tipo: Literal["ativos", "atrasados", "inativos"]):
-    db = SessionLocal()
-    try:
-        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()]
-        mapa = {
-            "ativos": "em_dia",
-            "atrasados": "atrasado",
-            "inativos": "inativo",
-        }
-        status_alvo = mapa[tipo]
-        filtrados = [a for a in alunos if a["status"] == status_alvo]
-
-        linhas = [f"Relatório ColiseuFit - {tipo.upper()}", f"Gerado em: {agora_str()}", ""]
-        for idx, a in enumerate(filtrados, start=1):
-            linhas.append(
-                f"{idx}. {a['nome']} | CPF: {a['cpf']} | Telefone: {a['telefone'] or '-'} | "
-                f"Plano: {a['plano_nome'] or '-'} | Vencimento: {a['vencimento'] or '-'}"
-            )
-        if not filtrados:
-            linhas.append("Nenhum aluno encontrado.")
-        return PlainTextResponse("\n".join(linhas), media_type="text/plain; charset=utf-8")
+        entradas = db.query(EntradaDB).filter(EntradaDB.aluno_id == aluno.id).order_by(EntradaDB.data_entrada.desc()).limit(max(1, min(limite, 300))).all()
+        return [entrada_to_dict_professor(db, e) for e in entradas]
     finally:
         db.close()
 
 
-class PagamentoLinkBody(BaseModel):
-    aluno_id: int
-    plano: Optional[str] = None
-
-@app.post("/pagamentos/link")
-def criar_link_pagamento(body: PagamentoLinkBody):
+@app.get("/alunos/{aluno_id}/historico-completo")
+def aluno_historico_completo(aluno_id: int):
     db = SessionLocal()
     try:
-        aluno = buscar_aluno_por_id(db, body.aluno_id)
+        aluno = buscar_aluno_por_id(db, aluno_id)
         if not aluno:
             raise HTTPException(status_code=404, detail="Aluno não encontrado")
-
-        plano_key = (body.plano or aluno.plano_nome or "mensal").strip().lower()
-        mapa = {
-            "mensal": "mensal",
-            "semestral": "semestral",
-            "anual": "anual",
-            "promocional": "promocional",
-        }
-        plano_key = mapa.get(plano_key, "mensal")
-        link = obter_link_plano(db, plano_key)
-
-        if not link:
-            # fallback para handle direto
-            link = f"https://link.infinitepay.io/{INFINITEPAY_HANDLE}"
-
+        pagamentos = db.query(PagamentoDB).filter(PagamentoDB.aluno_id == aluno.id).order_by(PagamentoDB.data_pagamento.desc()).limit(80).all()
+        entradas = db.query(EntradaDB).filter(EntradaDB.aluno_id == aluno.id).order_by(EntradaDB.data_entrada.desc()).limit(80).all()
+        concluidos = db.query(TreinoConcluidoDB).filter(TreinoConcluidoDB.aluno_id == aluno.id).order_by(TreinoConcluidoDB.concluido_em.desc()).limit(80).all()
+        auditorias = db.query(AuditoriaDB).filter(AuditoriaDB.alvo_tipo == "aluno", AuditoriaDB.alvo_id == aluno.id).order_by(AuditoriaDB.criado_em.desc()).limit(80).all()
         return {
-            "ok": True,
-            "url": link,
-            "checkout_url": link,
-            "plano": plano_key,
-            "aluno_id": aluno.id,
-        }
-    finally:
-        db.close()
-
-@app.put("/pagar/{aluno_id}")
-def registrar_pagamento_alias(aluno_id: int, body: PagamentoBody):
-    return registrar_pagamento(aluno_id, body)
-
-@app.get("/aluno/{aluno_id}/treinos")
-def listar_treinos_alias(aluno_id: int):
-    return listar_treinos(aluno_id)
-
-@app.put("/alunos/{aluno_id}/foto")
-def atualizar_foto_aluno_alias(aluno_id: int, body: FotoAlunoBody):
-    return atualizar_foto_aluno(aluno_id, body)
-
-@app.put("/config/planos/promocional")
-def atualizar_promocional_alias(valor: float = Query(...), dias: int = Query(PROMOCIONAL_DIAS_PADRAO)):
-    return atualizar_promocional(PromocionalConfigBody(valor=valor, dias=dias))
-
-@app.get("/relatorios/txt")
-def relatorio_texto_completo():
-    db = SessionLocal()
-    try:
-        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()]
-        pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
-
-        em_dia = [a for a in alunos if a["status"] == "em_dia"]
-        atrasados = [a for a in alunos if a["status"] == "atrasado"]
-        inativos = [a for a in alunos if a["status"] == "inativo"]
-        pendentes = [a for a in alunos if a["status"] == "pendente"]
-
-        potencial = sum(float(a.get("valor_final") or a.get("valor_plano") or 0) for a in atrasados)
-
-        linhas = []
-        linhas.append("COLISEUFIT - RELATÓRIO GERAL")
-        linhas.append("")
-        linhas.append(f"Total de alunos: {len(alunos)}")
-        linhas.append(f"Em dia: {len(em_dia)}")
-        linhas.append(f"Atrasados: {len(atrasados)}")
-        linhas.append(f"Inativos: {len(inativos)}")
-        linhas.append(f"Pendentes: {len(pendentes)}")
-        linhas.append(f"Potencial de ganho (somente atrasados): R$ {potencial:.2f}")
-        linhas.append("")
-
-        def bloco(titulo, lista):
-            linhas.append(f"=== {titulo} ({len(lista)}) ===")
-            if not lista:
-                linhas.append("Nenhum registro.")
-            else:
-                for a in lista:
-                    linhas.append(
-                        f"{a['nome']} | CPF: {a['cpf']} | Telefone: {a.get('telefone') or '-'} | "
-                        f"Plano: {a.get('plano_nome') or '-'} | Vencimento: {a.get('vencimento') or '-'}"
-                    )
-            linhas.append("")
-
-        bloco("EM DIA", em_dia)
-        bloco("ATRASADOS", atrasados)
-        bloco("INATIVOS", inativos)
-        bloco("PENDENTES", pendentes)
-
-        linhas.append(f"=== PAGAMENTOS REGISTRADOS ({len(pagamentos)}) ===")
-        if not pagamentos:
-            linhas.append("Nenhum pagamento registrado.")
-        else:
-            for p in pagamentos[:300]:
-                nome = p.aluno.nome if getattr(p, "aluno", None) else str(p.aluno_id)
-                linhas.append(
-                    f"{nome} | Plano: {p.plano_nome} | Valor: R$ {p.valor:.2f} | "
-                    f"Data: {p.data_pagamento.strftime('%Y-%m-%d %H:%M')} | Novo vencimento: {p.novo_vencimento or '-'}"
-                )
-
-        return PlainTextResponse("\n".join(linhas), media_type="text/plain; charset=utf-8")
-    finally:
-        db.close()
-
-
-# ----------------------
-# Compatibilidade com Flutter antigo/aprovado
-# ----------------------
-@app.get("/aluno/login")
-def aluno_login(cpf: str):
-    db = SessionLocal()
-    try:
-        aluno = buscar_aluno_por_cpf(db, cpf)
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-
-        avisos_nao_lidos_qtd = 0
-        try:
-            nao_lidos = db.query(AvisoLeituraDB).filter(AvisoLeituraDB.aluno_id == aluno.id).count()
-            total_avisos = db.query(AvisoDB).count()
-            avisos_nao_lidos_qtd = max(total_avisos - nao_lidos, 0)
-        except Exception:
-            db.rollback()
-            avisos_nao_lidos_qtd = 0
-
-        return {
-            "ok": True,
             "aluno": aluno_dict(db, aluno),
-            "avisos_nao_lidos": avisos_nao_lidos_qtd,
+            "pagamentos": [{"id": p.id, "valor": p.valor, "status": p.status, "origem": p.origem, "data": p.data_pagamento.isoformat() if p.data_pagamento else None, "observacao": p.observacao, "novo_vencimento": p.novo_vencimento} for p in pagamentos],
+            "acessos": [entrada_to_dict_professor(db, e) for e in entradas],
+            "treinos_concluidos": [{"id": t.id, "treino_id": t.treino_id, "categoria": t.categoria, "titulo": t.titulo, "concluido_em": t.concluido_em.isoformat() if t.concluido_em else None, "observacao": t.observacao} for t in concluidos],
+            "auditoria": [{"id": a.id, "acao": a.acao, "valor_antigo": a.valor_antigo, "valor_novo": a.valor_novo, "observacao": a.observacao, "criado_em": a.criado_em.isoformat() if a.criado_em else None, "ator_nome": a.ator_nome} for a in auditorias],
         }
     finally:
         db.close()
 
-@app.get("/relatorio/planos")
-def relatorio_planos():
-    db = SessionLocal()
-    try:
-        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).all()]
-        nomes = ["Mensal", "Semestral", "Anual", "Promocional", "Diária", "Gympass", "Total Pass"]
-        contagem = {n: 0 for n in nomes}
-        for a in alunos:
-            plano = (a.get("plano_nome") or "").strip().title()
-            if plano in contagem:
-                contagem[plano] += 1
-        return contagem
-    finally:
-        db.close()
 
-@app.get("/relatorio/vendas")
-def relatorio_vendas(periodo: str = "mes"):
-    db = SessionLocal()
-    try:
-        pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
-        total = sum(float(p.valor or 0) for p in pagamentos)
-        quantidade = len(pagamentos)
-        return {
-            "periodo": periodo,
-            "total": total,
-            "quantidade": quantidade,
-        }
-    finally:
-        db.close()
-
-@app.get("/historico")
-def historico_alias():
-    db = SessionLocal()
-    try:
-        pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
-        return [
-            {
-                "id": p.id,
-                "aluno_id": p.aluno_id,
-                "nome": p.aluno.nome if getattr(p, "aluno", None) else str(p.aluno_id),
-                "plano_nome": p.plano_nome,
-                "valor": float(p.valor or 0),
-                "dias": int(p.dias or 0),
-                "status": p.status,
-                "origem": p.origem,
-                "order_nsu": p.order_nsu,
-                "link_pagamento": p.link_pagamento,
-                "data_pagamento": p.data_pagamento.isoformat() if p.data_pagamento else None,
-                "novo_vencimento": p.novo_vencimento,
-                "vencimento_anterior": p.vencimento_anterior,
-                "reembolsado_em": p.reembolsado_em.isoformat() if getattr(p, "reembolsado_em", None) else None,
-                "pagamento_reembolsado_id": getattr(p, "pagamento_reembolsado_id", None),
-                "observacao": getattr(p, "observacao", None),
-            }
-            for p in pagamentos
-        ]
-    finally:
-        db.close()
-
-@app.delete("/avisos/{aviso_id}")
-def excluir_aviso(aviso_id: int):
-    db = SessionLocal()
-    try:
-        aviso = db.query(AvisoDB).filter(AvisoDB.id == aviso_id).first()
-        if not aviso:
-            raise HTTPException(status_code=404, detail="Aviso não encontrado")
-
-        # Primeiro apaga as leituras vinculadas ao aviso.
-        # Sem isso o PostgreSQL pode bloquear a exclusão por causa da FK
-        # avisos_leituras.aviso_id -> avisos.id.
-        db.query(AvisoLeituraDB).filter(AvisoLeituraDB.aviso_id == aviso_id).delete(synchronize_session=False)
-        db.delete(aviso)
-        db.commit()
-        return {"ok": True, "message": "Aviso excluído com sucesso"}
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as e:
-        db.rollback()
-        return JSONResponse(status_code=500, content={"ok": False, "error": f"Erro ao excluir aviso: {str(e)}"})
-    finally:
-        db.close()
-
-@app.get("/aluno/{aluno_id}/avisos")
-def avisos_aluno(aluno_id: int):
-    # Avisos estão em manutenção; mantém compatibilidade do Flutter sem erro 500.
+@app.post("/alunos/{aluno_id}/treinos/{treino_id}/concluir")
+def concluir_treino_aluno(aluno_id: int, treino_id: int, observacao: str = Body(default="")):
     db = SessionLocal()
     try:
         aluno = buscar_aluno_por_id(db, aluno_id)
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        try:
-            avisos = db.query(AvisoDB).order_by(AvisoDB.data.desc()).all()
-            lidos_ids = {
-                item.aviso_id for item in db.query(AvisoLeituraDB).filter(AvisoLeituraDB.aluno_id == aluno_id).all()
-            }
-            return {
-                "avisos": [
-                    {
-                        "id": a.id,
-                        "titulo": a.titulo,
-                        "mensagem": a.mensagem,
-                        "imagem_base64": a.imagem_base64,
-                        "data": a.data.isoformat() if a.data else None,
-                        "lido": a.id in lidos_ids,
-                    }
-                    for a in avisos
-                ],
-                "nao_lidos": sum(1 for a in avisos if a.id not in lidos_ids),
-            }
-        except Exception:
-            db.rollback()
-            return {"avisos": [], "nao_lidos": 0}
-    finally:
-        db.close()
-
-@app.post("/aluno/{aluno_id}/avisos/{aviso_id}/ler")
-def marcar_aviso_lido_compat(aluno_id: int, aviso_id: int):
-    db = SessionLocal()
-    try:
-        try:
-            existe = (
-                db.query(AvisoLeituraDB)
-                .filter(AvisoLeituraDB.aluno_id == aluno_id, AvisoLeituraDB.aviso_id == aviso_id)
-                .first()
-            )
-            if not existe:
-                db.add(AvisoLeituraDB(aluno_id=aluno_id, aviso_id=aviso_id, lido=True))
-            db.commit()
-        except Exception:
-            db.rollback()
-        return {"ok": True}
-    finally:
-        db.close()
-
-@app.post("/pagamentos/criar")
-def criar_pagamento_checkout_compat(body: CriarPagamentoCheckoutBody, db=Depends(get_db)):
-    try:
-        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-
-        if processar_inativacao_por_atraso(db, aluno):
-            db.commit()
-            db.refresh(aluno)
-
-        # Segurança: aluno renova apenas o plano atual com o valor final gravado no cadastro.
-        # Ignoramos valor vindo do frontend para evitar cobrança incorreta.
-        juros_checkout = juros_atraso_aluno(aluno)
-        valor_final = valor_final_aluno(db, aluno)
-        valor_final = round(max(valor_final, 1.0), 2)
-
-        plano_final = (aluno.plano_nome or body.plano_nome or "Mensal").strip()
-        dias_final = int(body.dias) if body.dias is not None else dias_por_plano(plano_final)
-        valor_centavos = int(round(valor_final * 100))
-        order_nsu = f"aluno_{aluno.id}_{int(now_br().timestamp())}"
-
-        checkout_payload = {
-            "handle": INFINITEPAY_HANDLE,
-            "items": [
-                {
-                    "name": f"Plano {plano_final} - Coliseu Fit",
-                    "description": f"Plano {plano_final} - {dias_final} dias",
-                    "quantity": 1,
-                    "price": valor_centavos,
-                }
-            ],
-            "order_nsu": order_nsu,
-            "redirect_url": f"{PUBLIC_BASE_URL}/pagamentos/retorno",
-            "webhook_url": f"{PUBLIC_BASE_URL}/webhooks/infinitepay",
-        }
-
-        resp = requests.post(INFINITEPAY_CHECKOUT_URL, json=checkout_payload, timeout=30)
-
-        try:
-            data = resp.json()
-        except Exception:
-            data = {"raw": resp.text}
-
-        if resp.status_code not in (200, 201):
-            raise HTTPException(status_code=502, detail=f"InfinitePay: {data}")
-
-        checkout_url = (
-            data.get("url")
-            or data.get("checkout_url")
-            or data.get("link")
-            or data.get("payment_url")
-            or (data.get("data") or {}).get("url")
-            or (data.get("data") or {}).get("checkout_url")
-            or (data.get("invoice") or {}).get("url")
-        )
-
-        if not checkout_url:
-            raise HTTPException(status_code=502, detail=f"Resposta inesperada da InfinitePay: {data}")
-
-        pagamento = PagamentoDB(
-            aluno_id=aluno.id,
-            plano_nome=plano_final,
-            valor=valor_final,
-            dias=dias_final,
-            status="pendente",
-            origem="infinitepay",
-            link_pagamento=checkout_url,
-            order_nsu=order_nsu,
-            data_pagamento=now_br(),
-            vencimento_anterior=aluno.vencimento,
-            novo_vencimento=calcular_novo_vencimento_fixo(aluno, dias_final, plano_final),
-            valor_juros=juros_checkout,
-        )
-        db.add(pagamento)
+        treino = db.query(TreinoDB).filter(TreinoDB.id == treino_id, TreinoDB.aluno_id == aluno_id).first()
+        if not aluno or not treino:
+            raise HTTPException(status_code=404, detail="Aluno ou treino não encontrado")
+        item = TreinoConcluidoDB(aluno_id=aluno.id, treino_id=treino.id, categoria=treino.categoria, titulo=treino.titulo, observacao=(observacao or None), concluido_em=now_br())
+        db.add(item)
+        registrar_auditoria(db, "treino_concluido", "aluno", aluno.id, aluno.nome, None, treino.titulo, "Treino marcado como concluído pelo aluno", ator_id=aluno.id, ator_nome=aluno.nome, ator_tipo="aluno")
         db.commit()
-        db.refresh(pagamento)
-
-        return {
-            "ok": True,
-            "modo": "checkout_dinamico",
-            "checkout_url": checkout_url,
-            "order_nsu": order_nsu,
-            "pagamento": pagamento_dict(pagamento),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/webhooks/infinitepay")
-def webhook_infinitepay(body: Optional[dict] = Body(default=None), db=Depends(get_db)):
-    """
-    Webhook seguro da InfinitePay.
-
-    Regra principal:
-    - cada checkout é criado com order_nsu único;
-    - esse order_nsu fica salvo na tabela pagamentos;
-    - o webhook só aprova o pagamento que tiver o mesmo order_nsu;
-    - se o webhook repetir, não renova o aluno duas vezes.
-    """
-    payload = body or {}
-
-    def nested_get(data, *keys):
-        atual = data
-        for key in keys:
-            if not isinstance(atual, dict):
-                return None
-            atual = atual.get(key)
-        return atual
-
-    order_nsu = (
-        payload.get("order_nsu")
-        or payload.get("orderNsu")
-        or payload.get("order")
-        or payload.get("order_id")
-        or payload.get("external_id")
-        or nested_get(payload, "data", "order_nsu")
-        or nested_get(payload, "data", "orderNsu")
-        or nested_get(payload, "data", "order")
-        or nested_get(payload, "data", "order_id")
-        or nested_get(payload, "data", "external_id")
-        or nested_get(payload, "invoice", "order_nsu")
-        or nested_get(payload, "invoice", "orderNsu")
-        or nested_get(payload, "invoice", "order")
-        or nested_get(payload, "invoice", "order_id")
-        or nested_get(payload, "invoice", "external_id")
-    )
-    order_nsu = str(order_nsu or "").strip()
-
-    transaction_status = str(
-        payload.get("status")
-        or payload.get("payment_status")
-        or payload.get("transaction_status")
-        or nested_get(payload, "data", "status")
-        or nested_get(payload, "data", "payment_status")
-        or nested_get(payload, "data", "transaction_status")
-        or nested_get(payload, "invoice", "status")
-        or ""
-    ).strip().lower()
-
-    event_name = str(
-        payload.get("event")
-        or payload.get("event_name")
-        or payload.get("type")
-        or nested_get(payload, "data", "event")
-        or nested_get(payload, "data", "type")
-        or ""
-    ).strip().lower()
-
-    if not order_nsu:
-        return {
-            "ok": True,
-            "mensagem": "webhook recebido sem order_nsu; nenhum aluno foi alterado",
-            "status": transaction_status or event_name or "desconhecido",
-        }
-
-    pagamento = (
-        db.query(PagamentoDB)
-        .filter(PagamentoDB.order_nsu == order_nsu)
-        .first()
-    )
-
-    if not pagamento:
-        return {
-            "ok": True,
-            "mensagem": "pagamento não encontrado para este order_nsu; nenhum aluno foi alterado",
-            "order_nsu": order_nsu,
-            "status": transaction_status or event_name or "desconhecido",
-        }
-
-    status_aprovado = {"paid", "approved", "completed", "success", "succeeded", "confirmed", "authorized", "captured", "paid_out"}
-    evento_aprovado = {"paid", "payment.paid", "invoice.paid", "charge.paid", "checkout.paid", "transaction.paid", "transaction.approved", "payment.approved"}
-    status_cancelado = {"canceled", "cancelled", "failed", "refused", "denied", "expired", "voided", "rejected"}
-
-    # A InfinitePay pode chamar o webhook sem um campo status claro, mas com dados de transação/recibo.
-    # Quando existe order_nsu + transaction_id/transaction_nsu/receipt_url/capture_method, consideramos pagamento confirmado.
-    sinal_pagamento_real = bool(
-        payload.get("transaction_id")
-        or payload.get("transaction_nsu")
-        or payload.get("receipt_url")
-        or payload.get("capture_method")
-        or nested_get(payload, "data", "transaction_id")
-        or nested_get(payload, "data", "transaction_nsu")
-        or nested_get(payload, "data", "receipt_url")
-        or nested_get(payload, "data", "capture_method")
-        or nested_get(payload, "transaction", "id")
-        or nested_get(payload, "transaction", "nsu")
-        or nested_get(payload, "transaction", "receipt_url")
-    )
-
-    aprovado = transaction_status in status_aprovado or event_name in evento_aprovado or sinal_pagamento_real
-    cancelado = transaction_status in status_cancelado
-
-    if aprovado:
-        # Idempotência: webhook pode chegar mais de uma vez. Não renova duas vezes.
-        if str(pagamento.status or "").lower() in {"aprovado", "pago", "paid", "approved", "completed"}:
-            return {
-                "ok": True,
-                "mensagem": "pagamento já estava aprovado; aluno não foi renovado novamente",
-                "order_nsu": order_nsu,
-                "pagamento": pagamento_dict(pagamento),
-            }
-
-        aluno = buscar_aluno_por_id(db, pagamento.aluno_id)
-        if not aluno:
-            return {
-                "ok": True,
-                "mensagem": "pagamento encontrado, mas aluno não existe mais; nenhum aluno foi alterado",
-                "order_nsu": order_nsu,
-                "pagamento_id": pagamento.id,
-            }
-
-        pagamento.status = "aprovado"
-        novo_vencimento = aplicar_pagamento_aluno(
-            db,
-            aluno,
-            pagamento.plano_nome,
-            float(pagamento.valor or 0),
-            int(pagamento.dias or 30),
-        )
-        pagamento.novo_vencimento = novo_vencimento
-        db.commit()
-        db.refresh(pagamento)
-
-        return {
-            "ok": True,
-            "mensagem": "pagamento aprovado e aluno atualizado para em dia",
-            "order_nsu": order_nsu,
-            "pagamento": pagamento_dict(pagamento),
-            "aluno": aluno_dict(db, aluno),
-        }
-
-    if cancelado:
-        if str(pagamento.status or "").lower() == "pendente":
-            pagamento.status = "cancelado"
-            db.commit()
-            db.refresh(pagamento)
-        return {
-            "ok": True,
-            "mensagem": "pagamento cancelado/recusado recebido; aluno não foi alterado",
-            "order_nsu": order_nsu,
-            "pagamento": pagamento_dict(pagamento),
-        }
-
-    return {
-        "ok": True,
-        "mensagem": "webhook recebido, mas status ainda não é aprovação",
-        "order_nsu": order_nsu,
-        "status": transaction_status or event_name or "desconhecido",
-        "pagamento": pagamento_dict(pagamento),
-    }
-
-
-
-# ----------------------
-# Juros / Chat
-# ----------------------
-@app.post("/pagamentos/retirar-juros/{aluno_id}")
-def retirar_juros_aluno(aluno_id: int, body: RetirarJurosBody = Body(default_factory=RetirarJurosBody)):
-    db = SessionLocal()
-    try:
-        aluno = buscar_aluno_por_id(db, aluno_id)
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        juros_atual = juros_atraso_aluno(aluno)
-        aluno.juros_perdoado_vencimento = aluno.vencimento
-        aluno.juros_perdoado_em = now_br()
-        aluno.juros_perdoado_por = body.usuario_admin or "ADM"
-        aluno.updated_at = now_br()
-        registro = PagamentoDB(
-            aluno_id=aluno.id,
-            plano_nome=aluno.plano_nome or "Juros",
-            valor=0.0,
-            dias=0,
-            status="juros_retirado",
-            origem="manual_admin",
-            data_pagamento=now_br(),
-            vencimento_anterior=aluno.vencimento,
-            novo_vencimento=aluno.vencimento,
-            observacao=body.observacao or "Juros retirado manualmente pelo administrador",
-            tipo_evento="juros_retirado",
-            valor_juros=juros_atual,
-        )
-        db.add(registro)
-        db.commit()
-        db.refresh(aluno)
-        return {"ok": True, "message": "Multa retirada com sucesso", "juros_retirado": juros_atual, "aluno": aluno_dict(db, aluno)}
-    finally:
-        db.close()
-
-def get_or_create_conversa(db, aluno_id: int) -> ConversaChatDB:
-    conversa = db.query(ConversaChatDB).filter(ConversaChatDB.aluno_id == aluno_id).first()
-    if conversa:
-        return conversa
-    conversa = ConversaChatDB(aluno_id=aluno_id, criada_em=now_br(), atualizada_em=now_br(), ultima_mensagem_em=now_br())
-    db.add(conversa)
-    db.commit()
-    db.refresh(conversa)
-    return conversa
-
-def conversa_dict(db, conversa: ConversaChatDB) -> dict:
-    aluno = buscar_aluno_por_id(db, conversa.aluno_id, incluir_deletados=False)
-    ultima = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa.id).order_by(MensagemChatDB.criada_em.desc()).first()
-    return {
-        "id": conversa.id,
-        "aluno_id": conversa.aluno_id,
-        "aluno_nome": aluno.nome if aluno else "Aluno",
-        "aluno_cpf": aluno.cpf if aluno else "",
-        "aluno_telefone": aluno.telefone if aluno else "",
-        "ultima_mensagem": ultima.mensagem if ultima else "",
-        "ultima_mensagem_em": (ultima.criada_em.isoformat() if ultima and ultima.criada_em else (conversa.ultima_mensagem_em.isoformat() if conversa.ultima_mensagem_em else None)),
-        "mensagens_nao_lidas_professor": conversa.mensagens_nao_lidas_professor or 0,
-        "mensagens_nao_lidas_aluno": conversa.mensagens_nao_lidas_aluno or 0,
-        "status": conversa.status,
-    }
-
-def mensagem_dict(msg: MensagemChatDB) -> dict:
-    return {
-        "id": msg.id,
-        "conversa_id": msg.conversa_id,
-        "aluno_id": msg.aluno_id,
-        "remetente_tipo": msg.remetente_tipo,
-        "remetente_id": msg.remetente_id,
-        "remetente_nome": msg.remetente_nome,
-        "mensagem": msg.mensagem,
-        "criada_em": msg.criada_em.isoformat() if msg.criada_em else None,
-        "lida_em": msg.lida_em.isoformat() if msg.lida_em else None,
-        "status": msg.status,
-    }
-
-def validar_professor_chat(db, professor_id: int) -> AlunoDB:
-    prof = buscar_aluno_por_id(db, professor_id)
-    if not prof or not aluno_premium_admin(prof) or not bool(getattr(prof, "pode_atender_chat", False)):
-        raise HTTPException(status_code=403, detail="Professor sem permissão para atender chat")
-    return prof
-
-@app.get("/chat/minha-conversa")
-def chat_minha_conversa(aluno_id: int = Query(...)):
-    db = SessionLocal()
-    try:
-        aluno = buscar_aluno_por_id(db, aluno_id)
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        conversa = get_or_create_conversa(db, aluno_id)
-        return conversa_dict(db, conversa)
-    finally:
-        db.close()
-
-@app.get("/chat/minha-conversa/mensagens")
-def chat_minhas_mensagens(aluno_id: int = Query(...)):
-    db = SessionLocal()
-    try:
-        conversa = get_or_create_conversa(db, aluno_id)
-        mensagens = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa.id).order_by(MensagemChatDB.criada_em.asc()).all()
-        return [mensagem_dict(m) for m in mensagens]
-    finally:
-        db.close()
-
-@app.post("/chat/minha-conversa/mensagens")
-def chat_enviar_aluno(body: ChatMensagemBody = Body(...)):
-    db = SessionLocal()
-    try:
-        aluno_id = int(body.aluno_id or 0)
-        aluno = buscar_aluno_por_id(db, aluno_id)
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        msg_txt = (body.mensagem or "").strip()
-        if not msg_txt:
-            raise HTTPException(status_code=400, detail="Mensagem vazia")
-        conversa = get_or_create_conversa(db, aluno_id)
-        msg = MensagemChatDB(conversa_id=conversa.id, aluno_id=aluno_id, remetente_tipo="aluno", remetente_id=aluno_id, remetente_nome=aluno.nome, mensagem=msg_txt, criada_em=now_br())
-        conversa.atualizada_em = now_br()
-        conversa.ultima_mensagem_em = msg.criada_em
-        conversa.mensagens_nao_lidas_professor = int(conversa.mensagens_nao_lidas_professor or 0) + 1
-        db.add(msg)
-        db.commit()
-        db.refresh(msg)
-        return {"ok": True, "mensagem": mensagem_dict(msg), "conversa": conversa_dict(db, conversa)}
-    finally:
-        db.close()
-
-@app.post("/chat/minha-conversa/marcar-lidas")
-def chat_aluno_marcar_lidas(aluno_id: int = Query(...)):
-    db = SessionLocal()
-    try:
-        conversa = get_or_create_conversa(db, aluno_id)
-        now = now_br()
-        db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa.id, MensagemChatDB.remetente_tipo.in_(["professor", "adm"]), MensagemChatDB.lida_em.is_(None)).update({MensagemChatDB.lida_em: now}, synchronize_session=False)
-        conversa.mensagens_nao_lidas_aluno = 0
-        conversa.atualizada_em = now
-        db.commit()
-        return {"ok": True}
-    finally:
-        db.close()
-
-@app.get("/chat/conversas")
-def chat_conversas(professor_id: int = Query(...)):
-    db = SessionLocal()
-    try:
-        validar_professor_chat(db, professor_id)
-        conversas = db.query(ConversaChatDB).order_by(ConversaChatDB.ultima_mensagem_em.desc().nullslast(), ConversaChatDB.atualizada_em.desc()).all()
-        return [conversa_dict(db, c) for c in conversas]
-    finally:
-        db.close()
-
-@app.get("/chat/conversas/{conversa_id}/mensagens")
-def chat_conversa_mensagens(conversa_id: int, professor_id: int = Query(...)):
-    db = SessionLocal()
-    try:
-        validar_professor_chat(db, professor_id)
-        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
-        if not conversa:
-            raise HTTPException(status_code=404, detail="Conversa não encontrada")
-        mensagens = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa_id).order_by(MensagemChatDB.criada_em.asc()).all()
-        return {"conversa": conversa_dict(db, conversa), "mensagens": [mensagem_dict(m) for m in mensagens]}
-    finally:
-        db.close()
-
-@app.post("/chat/conversas/{conversa_id}/mensagens")
-def chat_professor_responder(conversa_id: int, body: ChatMensagemBody = Body(...)):
-    db = SessionLocal()
-    try:
-        professor_id = int(body.professor_id or body.remetente_id or 0)
-        prof = validar_professor_chat(db, professor_id)
-        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
-        if not conversa:
-            raise HTTPException(status_code=404, detail="Conversa não encontrada")
-        msg_txt = (body.mensagem or "").strip()
-        if not msg_txt:
-            raise HTTPException(status_code=400, detail="Mensagem vazia")
-        msg = MensagemChatDB(conversa_id=conversa_id, aluno_id=conversa.aluno_id, remetente_tipo="professor", remetente_id=professor_id, remetente_nome=prof.nome, mensagem=msg_txt, criada_em=now_br())
-        conversa.atualizada_em = now_br()
-        conversa.ultima_mensagem_em = msg.criada_em
-        conversa.mensagens_nao_lidas_aluno = int(conversa.mensagens_nao_lidas_aluno or 0) + 1
-        db.add(msg)
-        db.commit()
-        db.refresh(msg)
-        return {"ok": True, "mensagem": mensagem_dict(msg), "conversa": conversa_dict(db, conversa)}
-    finally:
-        db.close()
-
-@app.post("/chat/conversas/{conversa_id}/marcar-lidas")
-def chat_professor_marcar_lidas(conversa_id: int, professor_id: int = Query(...)):
-    db = SessionLocal()
-    try:
-        validar_professor_chat(db, professor_id)
-        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
-        if not conversa:
-            raise HTTPException(status_code=404, detail="Conversa não encontrada")
-        now = now_br()
-        db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa_id, MensagemChatDB.remetente_tipo == "aluno", MensagemChatDB.lida_em.is_(None)).update({MensagemChatDB.lida_em: now}, synchronize_session=False)
-        conversa.mensagens_nao_lidas_professor = 0
-        conversa.atualizada_em = now
-        db.commit()
-        return {"ok": True}
+        return {"ok": True, "mensagem": "Treino concluído. Bom trabalho!", "progresso": aluno_progresso_mensal(db, aluno.id)}
     finally:
         db.close()
 
@@ -3894,6 +3106,7 @@ def admin_alterar_professor_permissoes(professor_id: int, body: ProfessorPermiss
             if key in campos_permitidos and value is not None:
                 setattr(prof, key, bool(value))
         prof.updated_at = now_br()
+        registrar_auditoria(db, "alterar_permissoes_professor", "professor", prof.id, prof.nome, None, str(dados), "Permissões atualizadas pelo ADM", ator_tipo="adm")
         db.commit()
         db.refresh(prof)
         return {"ok": True, "professor": aluno_dict(db, prof)}
@@ -3926,6 +3139,68 @@ def professor_dashboard(professor_id: int):
     finally:
         db.close()
 
+@app.get("/admin/alertas")
+def admin_alertas(limite: int = Query(default=50)):
+    db = SessionLocal()
+    try:
+        alertas = db.query(AlertaInternoDB).order_by(AlertaInternoDB.criado_em.desc()).limit(max(1, min(limite, 200))).all()
+        return [{"id": a.id, "perfil": a.perfil, "tipo": a.tipo, "titulo": a.titulo, "mensagem": a.mensagem, "aluno_id": a.aluno_id, "aluno_nome": a.aluno_nome, "status": a.status, "criado_em": a.criado_em.isoformat() if a.criado_em else None} for a in alertas]
+    finally:
+        db.close()
+
+@app.get("/admin/auditoria")
+def admin_auditoria(limite: int = Query(default=200)):
+    db = SessionLocal()
+    try:
+        logs = db.query(AuditoriaDB).order_by(AuditoriaDB.criado_em.desc()).limit(max(1, min(limite, 500))).all()
+        return [{"id": a.id, "ator_id": a.ator_id, "ator_nome": a.ator_nome, "ator_tipo": a.ator_tipo, "acao": a.acao, "alvo_tipo": a.alvo_tipo, "alvo_id": a.alvo_id, "alvo_nome": a.alvo_nome, "valor_antigo": a.valor_antigo, "valor_novo": a.valor_novo, "observacao": a.observacao, "criado_em": a.criado_em.isoformat() if a.criado_em else None} for a in logs]
+    finally:
+        db.close()
+
+@app.get("/admin/chat/conversas")
+def admin_chat_conversas():
+    db = SessionLocal()
+    try:
+        conversas = db.query(ConversaChatDB).order_by(ConversaChatDB.atualizada_em.desc()).all()
+        return [conversa_dict(db, c) for c in conversas]
+    finally:
+        db.close()
+
+@app.get("/admin/chat/conversas/{conversa_id}/mensagens")
+def admin_chat_mensagens(conversa_id: int):
+    db = SessionLocal()
+    try:
+        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+        msgs = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa_id).order_by(MensagemChatDB.criada_em.asc()).all()
+        return {"conversa": conversa_dict(db, conversa), "mensagens": [mensagem_dict(m) for m in msgs]}
+    finally:
+        db.close()
+
+@app.post("/admin/chat/conversas/{conversa_id}/mensagens")
+def admin_chat_responder(conversa_id: int, body: ChatMensagemBody = Body(...)):
+    db = SessionLocal()
+    try:
+        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+        msg = (body.mensagem or "").strip()
+        if not msg:
+            raise HTTPException(status_code=400, detail="Mensagem vazia")
+        now = now_br()
+        item = MensagemChatDB(conversa_id=conversa.id, aluno_id=conversa.aluno_id, remetente_tipo="adm", remetente_nome="Administração", mensagem=msg, criada_em=now)
+        db.add(item)
+        conversa.mensagens_nao_lidas_aluno = int(conversa.mensagens_nao_lidas_aluno or 0) + 1
+        conversa.ultima_mensagem_em = now
+        conversa.atualizada_em = now
+        registrar_auditoria(db, "responder_chat", "conversa", conversa.id, None, None, msg[:120], "Resposta enviada pelo ADM", ator_tipo="adm")
+        db.commit()
+        return {"ok": True, "mensagem": mensagem_dict(item)}
+    finally:
+        db.close()
+
+
 @app.get("/admin/professores-chat")
 def admin_professores_chat():
     db = SessionLocal()
@@ -3944,6 +3219,7 @@ def admin_alterar_professor_chat(professor_id: int, body: ProfessorChatPermissao
             raise HTTPException(status_code=404, detail="Professor/Premium não encontrado")
         prof.pode_atender_chat = bool(body.pode_atender_chat)
         prof.updated_at = now_br()
+        registrar_auditoria(db, "alterar_permissoes_professor", "professor", prof.id, prof.nome, None, str(dados), "Permissões atualizadas pelo ADM", ator_tipo="adm")
         db.commit()
         db.refresh(prof)
         return {"ok": True, "professor": aluno_dict(db, prof)}
