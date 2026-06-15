@@ -1786,13 +1786,51 @@ def assinatura_ativa_aluno(db, aluno_id: int) -> Optional[AssinaturaRecorrenteDB
         .first())
 
 
+def telefone_e164_br(value: Optional[str]) -> Optional[str]:
+    """Formata telefone para o padrão aceito no customer da InfinitePay.
+
+    Não cria dado falso: se o telefone estiver ausente ou curto, não envia.
+    """
+    digits = only_digits(value or "")
+    if not digits:
+        return None
+    if digits.startswith("55") and len(digits) in (12, 13):
+        return f"+{digits}"
+    if len(digits) in (10, 11):
+        return f"+55{digits}"
+    return None
+
+
+def email_cliente_pagamento(aluno: AlunoDB) -> Optional[str]:
+    email = (getattr(aluno, "email", None) or "").strip()
+    if "@" in email and "." in email.split("@")[-1]:
+        return email
+    return None
+
+
+def customer_infinitepay(aluno: AlunoDB) -> Optional[dict]:
+    customer = {}
+    nome = (getattr(aluno, "nome", None) or "").strip()
+    telefone = telefone_e164_br(getattr(aluno, "telefone", None))
+    email = email_cliente_pagamento(aluno)
+    if nome:
+        customer["name"] = nome
+    if email:
+        customer["email"] = email
+    if telefone:
+        customer["phone_number"] = telefone
+    return customer or None
+
+
 def criar_checkout_infinitepay(db, aluno: AlunoDB, metodo: str, recorrente: bool = False) -> dict:
     """Cria checkout seguro sem confiar no valor vindo do frontend.
 
-    Observação sobre recorrência: a versão atual usa o checkout seguro da InfinitePay
-    para o primeiro pagamento e salva a estrutura de assinatura. Se a conta InfinitePay
-    tiver endpoint oficial de assinatura/tokenização, basta configurar o provedor e trocar
-    esta função para usar esse endpoint. O app NÃO salva dados brutos do cartão.
+    A API pública de checkout da InfinitePay gera um link único. A escolha entre Pix
+    e cartão acontece dentro do checkout; o retorno/webhook informa capture_method.
+    Enviamos customer quando houver dados do aluno para reduzir preenchimento.
+
+    Recorrência real exige endpoint oficial de assinatura/tokenização do gateway.
+    O app NÃO salva dados brutos do cartão.
     """
     if aluno_sem_cobranca(aluno):
         raise HTTPException(status_code=400, detail="Seu tipo de acesso não possui cobrança pelo app")
@@ -1828,6 +1866,14 @@ def criar_checkout_infinitepay(db, aluno: AlunoDB, metodo: str, recorrente: bool
         "redirect_url": f"{PUBLIC_BASE_URL}/pagamentos/retorno",
         "webhook_url": f"{PUBLIC_BASE_URL}/webhooks/infinitepay",
     }
+
+    customer = customer_infinitepay(aluno)
+    if customer:
+        checkout_payload["customer"] = customer
+
+    # Não enviamos address. Mensalidade de academia não é entrega física.
+    # A InfinitePay documenta customer e address como opcionais; endereço só deve ser
+    # enviado quando houver entrega em mãos.
 
     resp = requests.post(INFINITEPAY_CHECKOUT_URL, json=checkout_payload, timeout=30)
     try:
@@ -2484,13 +2530,24 @@ def pagamentos_opcoes(aluno_id: int = Query(...)):
             "recorrente_disponivel": recorrente_disponivel,
             "recorrencia": assinatura_dict(recorrencia),
             "opcoes": [
-                {"metodo": "pix", "titulo": "Pix", "descricao": "Pague agora via Pix com confirmação automática.", "valor": total},
-                {"metodo": "cartao", "titulo": "Cartão", "descricao": "Pague agora com cartão de crédito.", "valor": total},
-                {"metodo": "recorrente", "titulo": "Cartão recorrente", "descricao": "Cadastre seu cartão e renove automaticamente.", "valor": total, "disponivel": recorrente_disponivel},
+                {"metodo": "checkout", "titulo": "Pagar agora", "descricao": "Checkout seguro InfinitePay: escolha Pix ou cartão na próxima tela.", "valor": total, "disponivel": True},
+                {"metodo": "recorrente", "titulo": "Cartão recorrente", "descricao": "Depende de assinatura/tokenização oficial do gateway.", "valor": total, "disponivel": False},
             ],
         }
     finally:
         db.close()
+
+@app.post("/pagamentos/checkout")
+def pagamentos_checkout(body: PagamentoOnlineBody):
+    db = SessionLocal()
+    try:
+        aluno = db.query(AlunoDB).filter(AlunoDB.id == body.aluno_id, AlunoDB.deletado == False).first()
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        return criar_checkout_infinitepay(db, aluno, "checkout", recorrente=False)
+    finally:
+        db.close()
+
 
 @app.post("/pagamentos/pix")
 def pagamentos_pix(body: PagamentoOnlineBody):
@@ -2520,16 +2577,12 @@ def pagamentos_cartao(body: PagamentoOnlineBody):
 
 @app.post("/pagamentos/recorrente/criar")
 def pagamentos_recorrente_criar(body: PagamentoOnlineBody):
-    db = SessionLocal()
-    try:
-        if not body.aluno_id:
-            raise HTTPException(status_code=400, detail="Aluno não informado")
-        aluno = buscar_aluno_por_id(db, int(body.aluno_id))
-        if not aluno:
-            raise HTTPException(status_code=404, detail="Aluno não encontrado")
-        return criar_checkout_infinitepay(db, aluno, "cartao", recorrente=True)
-    finally:
-        db.close()
+    # Não abrimos o mesmo checkout comum fingindo ser assinatura recorrente.
+    # Recorrência precisa de API oficial de assinatura/tokenização do gateway.
+    raise HTTPException(
+        status_code=501,
+        detail="Cartão recorrente ainda depende de assinatura/tokenização oficial do gateway. O app não salva dados de cartão e não cria recorrência falsa.",
+    )
 
 @app.get("/pagamentos/recorrente/status")
 def pagamentos_recorrente_status(aluno_id: int = Query(...)):
