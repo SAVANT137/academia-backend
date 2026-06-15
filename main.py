@@ -3519,3 +3519,203 @@ def atualizar_valor_manual(aluno_id: int, body: ValorManualBody):
 def aprovar_pagamento_demo(pagamento_id: int):
     return {"ok": True, "mensagem": "Modo demo desativado. Use o link real para pagar."}
 # deploy render atualizado v5.1.2
+
+# -----------------------------------------------------------------------------
+# V8.2 HOTFIX — endpoints de compatibilidade do painel ADM/relatórios
+# -----------------------------------------------------------------------------
+@app.get("/relatorio/resumo")
+def relatorio_resumo_v82():
+    """Resumo usado pelo dashboard ADM e relatórios.
+    Reposto na V8.2 para evitar dashboard zerado quando o Flutter chama /relatorio/resumo.
+    """
+    db = SessionLocal()
+    try:
+        alunos_db = db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).all()
+        alunos = [aluno_dict(db, a) for a in alunos_db]
+        em_dia = [a for a in alunos if a.get("status") == "em_dia"]
+        pendentes = [a for a in alunos if a.get("status") == "pendente"]
+        atrasados = [a for a in alunos if a.get("status") == "atrasado"]
+        inativos = [a for a in alunos if a.get("status") == "inativo"]
+
+        inicio = datetime.combine(hoje(), datetime.min.time())
+        fim = inicio + timedelta(days=1)
+        entradas_hoje = db.query(EntradaDB).filter(EntradaDB.data_entrada >= inicio, EntradaDB.data_entrada < fim).all()
+        bloqueados_hoje = len([e for e in entradas_hoje if str(e.status or "").lower() == "bloqueado"])
+        pagamentos_hoje = db.query(PagamentoDB).filter(PagamentoDB.data_pagamento >= inicio, PagamentoDB.data_pagamento < fim).all()
+        financeiro_hoje = sum(float(p.valor or 0) for p in pagamentos_hoje if str(p.status or "").lower() in ("pago", "confirmado", "em_dia"))
+        novos_cadastros = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.status == "aguardando_aprovacao").count()
+
+        potencial_atrasados = sum(float(a.get("valor_final") or a.get("valor_plano") or 0) for a in atrasados)
+        faturamento_real = sum(float(a.get("valor_final") or a.get("valor_plano") or 0) for a in em_dia)
+
+        return {
+            "ok": True,
+            "total_alunos": len(alunos),
+            "em_dia": len(em_dia),
+            "ativos": len(em_dia),
+            "pendentes": len(pendentes),
+            "atrasados": len(atrasados),
+            "inativos": len(inativos),
+            "entradas_hoje": len([e for e in entradas_hoje if str(e.status or "").lower() == "liberado"]),
+            "bloqueados_hoje": bloqueados_hoje,
+            "acessos_bloqueados_hoje": bloqueados_hoje,
+            "financeiro_hoje": financeiro_hoje,
+            "novos_cadastros": int(novos_cadastros or 0),
+            "faturamento_real": faturamento_real,
+            "potencial_atrasados": potencial_atrasados,
+            "inadimplencia_valor": potencial_atrasados,
+            "status_alunos": {
+                "em_dia": len(em_dia),
+                "ativos": len(em_dia),
+                "pendentes": len(pendentes),
+                "atrasados": len(atrasados),
+                "inativos": len(inativos),
+            },
+        }
+    finally:
+        db.close()
+
+@app.get("/relatorio/planos")
+def relatorio_planos_v82():
+    db = SessionLocal()
+    try:
+        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).all()]
+        contagem = {
+            "Mensal": 0,
+            "Semestral": 0,
+            "Anual": 0,
+            "Promocional": 0,
+            "Diária": 0,
+            "Gympass": 0,
+            "Total Pass": 0,
+            "Acesso Livre": 0,
+            "Professor/Premium": 0,
+        }
+        for a in alunos:
+            if a.get("premium_admin"):
+                contagem["Professor/Premium"] += 1
+                continue
+            if a.get("acesso_livre"):
+                contagem["Acesso Livre"] += 1
+                continue
+            plano = str(a.get("plano_nome") or "").strip().lower()
+            if "total" in plano and "pass" in plano:
+                contagem["Total Pass"] += 1
+            elif "gym" in plano:
+                contagem["Gympass"] += 1
+            elif "semes" in plano:
+                contagem["Semestral"] += 1
+            elif "anual" in plano:
+                contagem["Anual"] += 1
+            elif "promo" in plano:
+                contagem["Promocional"] += 1
+            elif "di" in plano:
+                contagem["Diária"] += 1
+            else:
+                contagem["Mensal"] += 1
+        return contagem
+    finally:
+        db.close()
+
+@app.get("/relatorio/vendas")
+def relatorio_vendas_v82(periodo: str = "mes"):
+    db = SessionLocal()
+    try:
+        pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
+        total = sum(float(p.valor or 0) for p in pagamentos if str(p.status or "").lower() in ("pago", "confirmado", "em_dia"))
+        return {"periodo": periodo, "total": total, "quantidade": len(pagamentos)}
+    finally:
+        db.close()
+
+@app.get("/historico")
+def historico_alias_v82():
+    db = SessionLocal()
+    try:
+        pagamentos = db.query(PagamentoDB).order_by(PagamentoDB.data_pagamento.desc()).all()
+        return [
+            {
+                "id": p.id,
+                "aluno_id": p.aluno_id,
+                "nome": p.aluno.nome if getattr(p, "aluno", None) else str(p.aluno_id),
+                "plano_nome": p.plano_nome,
+                "valor": float(p.valor or 0),
+                "dias": int(p.dias or 0),
+                "status": p.status,
+                "origem": p.origem,
+                "order_nsu": p.order_nsu,
+                "link_pagamento": p.link_pagamento,
+                "data_pagamento": p.data_pagamento.isoformat() if p.data_pagamento else None,
+                "novo_vencimento": p.novo_vencimento,
+                "vencimento_anterior": p.vencimento_anterior,
+                "reembolsado_em": p.reembolsado_em.isoformat() if getattr(p, "reembolsado_em", None) else None,
+                "pagamento_reembolsado_id": getattr(p, "pagamento_reembolsado_id", None),
+                "observacao": getattr(p, "observacao", None),
+            }
+            for p in pagamentos
+        ]
+    finally:
+        db.close()
+
+@app.get("/relatorio/texto/{tipo}")
+def relatorio_texto_v82(tipo: Literal["ativos", "atrasados", "inativos"]):
+    db = SessionLocal()
+    try:
+        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()]
+        mapa = {"ativos": "em_dia", "atrasados": "atrasado", "inativos": "inativo"}
+        filtrados = [a for a in alunos if a.get("status") == mapa[tipo]]
+        linhas = [f"Relatório Coliseu Fit - {tipo.upper()}", f"Gerado em: {agora_str()}", ""]
+        for idx, a in enumerate(filtrados, start=1):
+            linhas.append(f"{idx}. {a.get('nome')} | CPF: {a.get('cpf')} | Telefone: {a.get('telefone') or '-'} | Plano: {a.get('plano_nome') or '-'} | Vencimento: {a.get('vencimento') or '-'}")
+        if not filtrados:
+            linhas.append("Nenhum aluno encontrado.")
+        return PlainTextResponse("\n".join(linhas), media_type="text/plain; charset=utf-8")
+    finally:
+        db.close()
+
+@app.get("/relatorios/txt")
+def relatorio_texto_completo_v82():
+    db = SessionLocal()
+    try:
+        resumo = relatorio_resumo_v82()
+        alunos = [aluno_dict(db, a) for a in db.query(AlunoDB).filter(or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()]
+        linhas = ["COLISEU FIT - RELATÓRIO GERAL", "", f"Gerado em: {agora_str()}", ""]
+        linhas += [
+            f"Total de alunos: {resumo.get('total_alunos', 0)}",
+            f"Em dia: {resumo.get('em_dia', 0)}",
+            f"Pendentes: {resumo.get('pendentes', 0)}",
+            f"Atrasados: {resumo.get('atrasados', 0)}",
+            f"Inativos: {resumo.get('inativos', 0)}",
+            "",
+        ]
+        for a in alunos:
+            linhas.append(f"{a.get('nome')} | CPF: {a.get('cpf')} | Status: {a.get('status')} | Plano: {a.get('plano_nome') or '-'} | Vencimento: {a.get('vencimento') or '-'}")
+        return PlainTextResponse("\n".join(linhas), media_type="text/plain; charset=utf-8")
+    finally:
+        db.close()
+
+@app.get("/aluno/login")
+def aluno_login_alias_v82(cpf: str):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_cpf(db, cpf)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        return {"ok": True, "aluno": aluno_dict(db, aluno), "avisos_nao_lidos": 0}
+    finally:
+        db.close()
+
+@app.put("/pagar/{aluno_id}")
+def registrar_pagamento_alias_v82(aluno_id: int, body: PagamentoBody):
+    return registrar_pagamento(aluno_id, body)
+
+@app.get("/aluno/{aluno_id}/treinos")
+def listar_treinos_alias_v82(aluno_id: int):
+    return listar_treinos(aluno_id)
+
+@app.put("/alunos/{aluno_id}/foto")
+def atualizar_foto_aluno_alias_v82(aluno_id: int, body: FotoAlunoBody):
+    return atualizar_foto_aluno(aluno_id, body)
+
+@app.put("/config/planos/promocional")
+def atualizar_promocional_alias_v82(valor: float = Query(...), dias: int = Query(PROMOCIONAL_DIAS_PADRAO)):
+    return atualizar_promocional(PromocionalConfigBody(valor=valor, dias=dias))
