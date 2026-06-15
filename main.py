@@ -3139,6 +3139,180 @@ def professor_dashboard(professor_id: int):
     finally:
         db.close()
 
+
+# -----------------------------------------------------------------------------
+# Chat helpers/endpoints restaurados — aluno, professor e ADM usam a mesma base.
+# -----------------------------------------------------------------------------
+def mensagem_dict(m: MensagemChatDB) -> dict:
+    return {
+        "id": m.id,
+        "conversa_id": m.conversa_id,
+        "aluno_id": m.aluno_id,
+        "remetente_tipo": m.remetente_tipo,
+        "remetente_id": m.remetente_id,
+        "remetente_nome": m.remetente_nome,
+        "mensagem": m.mensagem,
+        "criada_em": m.criada_em.isoformat() if m.criada_em else None,
+        "lida_em": m.lida_em.isoformat() if m.lida_em else None,
+        "status": m.status,
+    }
+
+def conversa_dict(db, c: ConversaChatDB) -> dict:
+    aluno = buscar_aluno_por_id(db, c.aluno_id)
+    ultima = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == c.id).order_by(MensagemChatDB.criada_em.desc()).first()
+    return {
+        "id": c.id,
+        "aluno_id": c.aluno_id,
+        "aluno_nome": getattr(aluno, "nome", None) or f"Aluno {c.aluno_id}",
+        "aluno_cpf": getattr(aluno, "cpf", None),
+        "aluno_telefone": getattr(aluno, "telefone", None),
+        "status": c.status,
+        "criada_em": c.criada_em.isoformat() if c.criada_em else None,
+        "atualizada_em": c.atualizada_em.isoformat() if c.atualizada_em else None,
+        "ultima_mensagem_em": (c.ultima_mensagem_em or c.atualizada_em or c.criada_em).isoformat() if (c.ultima_mensagem_em or c.atualizada_em or c.criada_em) else None,
+        "ultima_mensagem": getattr(ultima, "mensagem", "") if ultima else "",
+        "mensagens_nao_lidas_professor": int(c.mensagens_nao_lidas_professor or 0),
+        "mensagens_nao_lidas_aluno": int(c.mensagens_nao_lidas_aluno or 0),
+    }
+
+def obter_ou_criar_conversa(db, aluno_id: int) -> ConversaChatDB:
+    conversa = db.query(ConversaChatDB).filter(ConversaChatDB.aluno_id == aluno_id).first()
+    if conversa:
+        return conversa
+    aluno = buscar_aluno_por_id(db, aluno_id)
+    if not aluno:
+        raise HTTPException(status_code=404, detail="Aluno não encontrado")
+    now = now_br()
+    conversa = ConversaChatDB(aluno_id=aluno_id, criada_em=now, atualizada_em=now, ultima_mensagem_em=now, status="aberta")
+    db.add(conversa)
+    db.commit()
+    db.refresh(conversa)
+    return conversa
+
+@app.get("/chat/minha-conversa")
+def chat_minha_conversa(aluno_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        conversa = obter_ou_criar_conversa(db, aluno_id)
+        return conversa_dict(db, conversa)
+    finally:
+        db.close()
+
+@app.get("/chat/minha-conversa/mensagens")
+def chat_minhas_mensagens(aluno_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        conversa = obter_ou_criar_conversa(db, aluno_id)
+        msgs = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa.id).order_by(MensagemChatDB.criada_em.asc()).all()
+        return [mensagem_dict(m) for m in msgs]
+    finally:
+        db.close()
+
+@app.post("/chat/minha-conversa/mensagens")
+def chat_enviar_aluno(body: ChatMensagemBody = Body(...)):
+    db = SessionLocal()
+    try:
+        aluno = buscar_aluno_por_id(db, body.aluno_id)
+        if not aluno:
+            raise HTTPException(status_code=404, detail="Aluno não encontrado")
+        msg = (body.mensagem or "").strip()
+        if not msg:
+            raise HTTPException(status_code=400, detail="Mensagem vazia")
+        conversa = obter_ou_criar_conversa(db, aluno.id)
+        now = now_br()
+        item = MensagemChatDB(conversa_id=conversa.id, aluno_id=aluno.id, remetente_tipo="aluno", remetente_id=aluno.id, remetente_nome=aluno.nome, mensagem=msg, criada_em=now)
+        db.add(item)
+        conversa.mensagens_nao_lidas_professor = int(conversa.mensagens_nao_lidas_professor or 0) + 1
+        conversa.ultima_mensagem_em = now
+        conversa.atualizada_em = now
+        db.commit()
+        db.refresh(item)
+        return {"ok": True, "mensagem": mensagem_dict(item), "conversa": conversa_dict(db, conversa)}
+    finally:
+        db.close()
+
+@app.post("/chat/minha-conversa/marcar-lidas")
+def chat_marcar_lidas_aluno(aluno_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        conversa = obter_ou_criar_conversa(db, aluno_id)
+        conversa.mensagens_nao_lidas_aluno = 0
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+@app.get("/chat/conversas")
+def chat_conversas_professor(professor_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        prof = buscar_aluno_por_id(db, professor_id)
+        if not prof or not is_professor_user(prof):
+            raise HTTPException(status_code=403, detail="Acesso permitido apenas para professor")
+        if not professor_tem_permissao(prof, "pode_atender_chat", False):
+            raise HTTPException(status_code=403, detail="Professor sem permissão para atender chat")
+        conversas = db.query(ConversaChatDB).order_by(ConversaChatDB.atualizada_em.desc()).all()
+        return [conversa_dict(db, c) for c in conversas]
+    finally:
+        db.close()
+
+@app.get("/chat/conversas/{conversa_id}/mensagens")
+def chat_mensagens_professor(conversa_id: int, professor_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        prof = buscar_aluno_por_id(db, professor_id)
+        if not prof or not is_professor_user(prof) or not professor_tem_permissao(prof, "pode_atender_chat", False):
+            raise HTTPException(status_code=403, detail="Professor sem permissão para atender chat")
+        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+        msgs = db.query(MensagemChatDB).filter(MensagemChatDB.conversa_id == conversa_id).order_by(MensagemChatDB.criada_em.asc()).all()
+        return {"conversa": conversa_dict(db, conversa), "mensagens": [mensagem_dict(m) for m in msgs]}
+    finally:
+        db.close()
+
+@app.post("/chat/conversas/{conversa_id}/mensagens")
+def chat_responder_professor(conversa_id: int, body: ChatMensagemBody = Body(...)):
+    db = SessionLocal()
+    try:
+        prof = buscar_aluno_por_id(db, body.professor_id)
+        if not prof or not is_professor_user(prof) or not professor_tem_permissao(prof, "pode_atender_chat", False):
+            raise HTTPException(status_code=403, detail="Professor sem permissão para atender chat")
+        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+        msg = (body.mensagem or "").strip()
+        if not msg:
+            raise HTTPException(status_code=400, detail="Mensagem vazia")
+        now = now_br()
+        item = MensagemChatDB(conversa_id=conversa.id, aluno_id=conversa.aluno_id, remetente_tipo="professor", remetente_id=prof.id, remetente_nome=prof.nome, mensagem=msg, criada_em=now)
+        db.add(item)
+        conversa.mensagens_nao_lidas_aluno = int(conversa.mensagens_nao_lidas_aluno or 0) + 1
+        conversa.mensagens_nao_lidas_professor = 0
+        conversa.ultima_mensagem_em = now
+        conversa.atualizada_em = now
+        db.commit()
+        db.refresh(item)
+        return {"ok": True, "mensagem": mensagem_dict(item), "conversa": conversa_dict(db, conversa)}
+    finally:
+        db.close()
+
+@app.post("/chat/conversas/{conversa_id}/marcar-lidas")
+def chat_marcar_lidas_professor(conversa_id: int, professor_id: int = Query(...)):
+    db = SessionLocal()
+    try:
+        prof = buscar_aluno_por_id(db, professor_id)
+        if not prof or not is_professor_user(prof):
+            raise HTTPException(status_code=403, detail="Acesso permitido apenas para professor")
+        conversa = db.query(ConversaChatDB).filter(ConversaChatDB.id == conversa_id).first()
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+        conversa.mensagens_nao_lidas_professor = 0
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
 @app.get("/admin/alertas")
 def admin_alertas(limite: int = Query(default=50)):
     db = SessionLocal()
@@ -3524,7 +3698,7 @@ def aprovar_pagamento_demo(pagamento_id: int):
 # V8.2 HOTFIX — endpoints de compatibilidade do painel ADM/relatórios
 # -----------------------------------------------------------------------------
 @app.get("/relatorio/resumo")
-def relatorio_resumo_v82():
+def relatorio_resumo_v82(data_inicio: Optional[str] = Query(default=None), data_fim: Optional[str] = Query(default=None)):
     """Resumo usado pelo dashboard ADM e relatórios.
     Reposto na V8.2 para evitar dashboard zerado quando o Flutter chama /relatorio/resumo.
     """
@@ -3537,12 +3711,20 @@ def relatorio_resumo_v82():
         atrasados = [a for a in alunos if a.get("status") == "atrasado"]
         inativos = [a for a in alunos if a.get("status") == "inativo"]
 
-        inicio = datetime.combine(hoje(), datetime.min.time())
-        fim = inicio + timedelta(days=1)
-        entradas_hoje = db.query(EntradaDB).filter(EntradaDB.data_entrada >= inicio, EntradaDB.data_entrada < fim).all()
-        bloqueados_hoje = len([e for e in entradas_hoje if str(e.status or "").lower() == "bloqueado"])
-        pagamentos_hoje = db.query(PagamentoDB).filter(PagamentoDB.data_pagamento >= inicio, PagamentoDB.data_pagamento < fim).all()
-        financeiro_hoje = sum(float(p.valor or 0) for p in pagamentos_hoje if str(p.status or "").lower() in ("pago", "confirmado", "em_dia"))
+        d_ini = parse_date_safe(data_inicio) or hoje()
+        d_fim = parse_date_safe(data_fim) or d_ini
+        if d_fim < d_ini:
+            d_ini, d_fim = d_fim, d_ini
+        inicio = datetime.combine(d_ini, datetime.min.time())
+        fim = datetime.combine(d_fim + timedelta(days=1), datetime.min.time())
+        entradas_periodo = db.query(EntradaDB).filter(EntradaDB.data_entrada >= inicio, EntradaDB.data_entrada < fim).all()
+        bloqueados_periodo = len([e for e in entradas_periodo if str(e.status or "").lower() == "bloqueado"])
+        pagamentos_periodo = db.query(PagamentoDB).filter(PagamentoDB.data_pagamento >= inicio, PagamentoDB.data_pagamento < fim).all()
+        financeiro_periodo = sum(float(p.valor or 0) for p in pagamentos_periodo if str(p.status or "").lower() in ("pago", "confirmado", "em_dia", "aprovado"))
+        # Mantém aliases do dashboard antigo quando o período é hoje.
+        entradas_hoje = entradas_periodo
+        bloqueados_hoje = bloqueados_periodo
+        financeiro_hoje = financeiro_periodo
         novos_cadastros = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.status == "aguardando_aprovacao").count()
 
         potencial_atrasados = sum(float(a.get("valor_final") or a.get("valor_plano") or 0) for a in atrasados)
@@ -3557,9 +3739,14 @@ def relatorio_resumo_v82():
             "atrasados": len(atrasados),
             "inativos": len(inativos),
             "entradas_hoje": len([e for e in entradas_hoje if str(e.status or "").lower() == "liberado"]),
+            "entradas_periodo": len([e for e in entradas_periodo if str(e.status or "").lower() == "liberado"]),
+            "periodo_inicio": d_ini.isoformat(),
+            "periodo_fim": d_fim.isoformat(),
             "bloqueados_hoje": bloqueados_hoje,
+            "bloqueados_periodo": bloqueados_periodo,
             "acessos_bloqueados_hoje": bloqueados_hoje,
             "financeiro_hoje": financeiro_hoje,
+            "financeiro_periodo": financeiro_periodo,
             "novos_cadastros": int(novos_cadastros or 0),
             "faturamento_real": faturamento_real,
             "potencial_atrasados": potencial_atrasados,
