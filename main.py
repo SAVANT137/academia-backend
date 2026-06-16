@@ -1223,6 +1223,28 @@ def aluno_super_admin(aluno: AlunoDB) -> bool:
     cpf = only_digits(getattr(aluno, "cpf", "") or "")
     return bool(getattr(aluno, "pode_acessar_adm", False)) or cpf == "87740648191"
 
+def is_professor_user(aluno: Optional[AlunoDB]) -> bool:
+    """Retorna True para usuários que podem entrar na área de professor.
+
+    Hotfix V9.3.1: algumas rotas do chat do professor chamavam essa função,
+    mas ela não estava definida no arquivo V9.3, gerando erro 500 e impedindo
+    professores com chat ativo de ver as conversas.
+
+    Mantém a regra atual: Professor/Premium é professor. Também aceita quem
+    estiver com `pode_atender_chat` ativo para não bloquear um cadastro já
+    liberado pelo ADM.
+    """
+    if aluno is None:
+        return False
+    return bool(
+        getattr(aluno, "premium_admin", False)
+        or getattr(aluno, "pode_atender_chat", False)
+        or getattr(aluno, "prof_ver_alunos", False)
+        or getattr(aluno, "prof_ver_acessos", False)
+        or getattr(aluno, "prof_ver_passes", False)
+        or getattr(aluno, "prof_ver_treinos", False)
+    )
+
 def aluno_sem_cobranca(aluno: AlunoDB) -> bool:
     return aluno_premium_admin(aluno) or aluno_acesso_livre(aluno) or aluno_eh_pass(aluno)
 
@@ -3611,7 +3633,10 @@ def concluir_treino_aluno(aluno_id: int, treino_id: int, observacao: str = Body(
 def admin_professores_permissoes():
     db = SessionLocal()
     try:
-        professores = db.query(AlunoDB).filter(AlunoDB.premium_admin == True, or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))).order_by(AlunoDB.nome.asc()).all()
+        professores = db.query(AlunoDB).filter(
+            or_(AlunoDB.premium_admin == True, AlunoDB.pode_atender_chat == True),
+            or_(AlunoDB.deletado == False, AlunoDB.deletado.is_(None))
+        ).order_by(AlunoDB.nome.asc()).all()
         return [aluno_dict(db, p) for p in professores]
     finally:
         db.close()
@@ -3916,9 +3941,11 @@ def admin_alterar_professor_chat(professor_id: int, body: ProfessorChatPermissao
         prof = buscar_aluno_por_id(db, professor_id)
         if not prof or not aluno_premium_admin(prof):
             raise HTTPException(status_code=404, detail="Professor/Premium não encontrado")
+        valor_antigo = bool(getattr(prof, "pode_atender_chat", False))
         prof.pode_atender_chat = bool(body.pode_atender_chat)
         prof.updated_at = now_br()
-        registrar_auditoria(db, "alterar_permissoes_professor", "professor", prof.id, prof.nome, None, str(dados), "Permissões atualizadas pelo ADM", ator_tipo="adm")
+        dados = {"pode_atender_chat": prof.pode_atender_chat}
+        registrar_auditoria(db, "alterar_permissoes_professor", "professor", prof.id, prof.nome, str(valor_antigo), str(dados), "Permissões de chat atualizadas pelo ADM", ator_tipo="adm")
         db.commit()
         db.refresh(prof)
         return {"ok": True, "professor": aluno_dict(db, prof)}
