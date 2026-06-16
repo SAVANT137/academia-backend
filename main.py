@@ -103,6 +103,13 @@ class AlunoDB(Base):
     telefone = Column(String, nullable=True)
     cpf = Column(String, unique=True, nullable=False, index=True)
     email = Column(String, nullable=True)
+    endereco_logradouro = Column(String, nullable=True)
+    endereco_numero = Column(String, nullable=True)
+    endereco_complemento = Column(String, nullable=True)
+    endereco_bairro = Column(String, nullable=True)
+    endereco_cidade = Column(String, nullable=True)
+    endereco_estado = Column(String, nullable=True)
+    endereco_cep = Column(String, nullable=True)
     sexo = Column(String, nullable=True)
 
     status_manual = Column(String, default="pendente")  # pendente / em_dia / atrasado / inativo
@@ -419,6 +426,13 @@ def ensure_schema_updates():
 
         expected_columns = {
             "email": "ALTER TABLE alunos ADD COLUMN email VARCHAR(255)",
+            "endereco_logradouro": "ALTER TABLE alunos ADD COLUMN endereco_logradouro VARCHAR(255)",
+            "endereco_numero": "ALTER TABLE alunos ADD COLUMN endereco_numero VARCHAR(50)",
+            "endereco_complemento": "ALTER TABLE alunos ADD COLUMN endereco_complemento VARCHAR(255)",
+            "endereco_bairro": "ALTER TABLE alunos ADD COLUMN endereco_bairro VARCHAR(120)",
+            "endereco_cidade": "ALTER TABLE alunos ADD COLUMN endereco_cidade VARCHAR(120)",
+            "endereco_estado": "ALTER TABLE alunos ADD COLUMN endereco_estado VARCHAR(30)",
+            "endereco_cep": "ALTER TABLE alunos ADD COLUMN endereco_cep VARCHAR(30)",
             "sexo": "ALTER TABLE alunos ADD COLUMN sexo VARCHAR(50)",
             "status_manual": "ALTER TABLE alunos ADD COLUMN status_manual VARCHAR(20) DEFAULT 'pendente'",
             "plano_nome": "ALTER TABLE alunos ADD COLUMN plano_nome VARCHAR(100)",
@@ -1562,6 +1576,13 @@ def aluno_dict(db, aluno: AlunoDB) -> dict:
         "telefone": aluno.telefone,
         "cpf": aluno.cpf,
         "email": aluno.email,
+        "endereco_logradouro": getattr(aluno, "endereco_logradouro", None),
+        "endereco_numero": getattr(aluno, "endereco_numero", None),
+        "endereco_complemento": getattr(aluno, "endereco_complemento", None),
+        "endereco_bairro": getattr(aluno, "endereco_bairro", None),
+        "endereco_cidade": getattr(aluno, "endereco_cidade", None),
+        "endereco_estado": getattr(aluno, "endereco_estado", None),
+        "endereco_cep": getattr(aluno, "endereco_cep", None),
         "sexo": aluno.sexo,
         "status": status,
         "status_manual": aluno.status_manual,
@@ -1822,6 +1843,33 @@ def customer_infinitepay(aluno: AlunoDB) -> Optional[dict]:
     return customer or None
 
 
+def endereco_infinitepay(aluno: AlunoDB) -> Optional[dict]:
+    """Envia endereço salvo apenas quando existir.
+    O app não exige endereço; isto serve para reaproveitar dados que o gateway
+    eventualmente devolver no webhook/retorno, evitando digitação repetida.
+    """
+    cep = only_digits(getattr(aluno, "endereco_cep", None) or "")
+    rua = (getattr(aluno, "endereco_logradouro", None) or "").strip()
+    cidade = (getattr(aluno, "endereco_cidade", None) or "").strip()
+    estado = (getattr(aluno, "endereco_estado", None) or "").strip().upper()
+    if not (rua and cidade and estado and cep):
+        return None
+    address = {
+        "street": rua,
+        "number": (getattr(aluno, "endereco_numero", None) or "S/N").strip() or "S/N",
+        "city": cidade,
+        "state": estado[:2],
+        "zip_code": cep,
+    }
+    bairro = (getattr(aluno, "endereco_bairro", None) or "").strip()
+    complemento = (getattr(aluno, "endereco_complemento", None) or "").strip()
+    if bairro:
+        address["neighborhood"] = bairro
+    if complemento:
+        address["complement"] = complemento
+    return address
+
+
 def criar_checkout_infinitepay(db, aluno: AlunoDB, metodo: str, recorrente: bool = False) -> dict:
     """Cria checkout seguro sem confiar no valor vindo do frontend.
 
@@ -1870,10 +1918,12 @@ def criar_checkout_infinitepay(db, aluno: AlunoDB, metodo: str, recorrente: bool
     customer = customer_infinitepay(aluno)
     if customer:
         checkout_payload["customer"] = customer
+    address = endereco_infinitepay(aluno)
+    if address:
+        checkout_payload["address"] = address
 
-    # Não enviamos address. Mensalidade de academia não é entrega física.
-    # A InfinitePay documenta customer e address como opcionais; endereço só deve ser
-    # enviado quando houver entrega em mãos.
+    # O app não exige endereço. Se o gateway devolver endereço em algum retorno/webhook,
+    # salvamos com segurança e reenviamos nos próximos checkouts para facilitar.
 
     resp = requests.post(INFINITEPAY_CHECKOUT_URL, json=checkout_payload, timeout=30)
     try:
@@ -1935,7 +1985,7 @@ def criar_checkout_infinitepay(db, aluno: AlunoDB, metodo: str, recorrente: bool
         status_gateway="checkout_criado",
         recorrente=recorrente,
         gateway_subscription_id=gateway_subscription_id,
-        observacao=("Primeiro pagamento de cartão recorrente. Acesso só libera após confirmação." if recorrente else f"Pagamento {metodo_clean} iniciado pelo aluno."),
+        observacao=("Primeiro pagamento de cartão recorrente. Acesso só libera após confirmação." if recorrente else "Pagamento iniciado pelo checkout InfinitePay."),
     )
     db.add(pagamento)
     db.commit()
@@ -1955,7 +2005,7 @@ def criar_checkout_infinitepay(db, aluno: AlunoDB, metodo: str, recorrente: bool
         "dias": dias_final,
         "pagamento": pagamento_dict(pagamento),
         "recorrencia": assinatura_dict(assinatura) if assinatura else None,
-        "observacao": "Dados de cartão não são salvos no app. O checkout seguro do gateway é usado para pagamento/tokenização.",
+        "observacao": "O checkout seguro da InfinitePay é aberto em uma única opção. O app envia os dados já cadastrados do aluno para facilitar o preenchimento.",
     }
 
 def obter_link_plano(db, plano_key: str) -> Optional[str]:
@@ -2531,7 +2581,6 @@ def pagamentos_opcoes(aluno_id: int = Query(...)):
             "recorrencia": assinatura_dict(recorrencia),
             "opcoes": [
                 {"metodo": "checkout", "titulo": "Pagar agora", "descricao": "Checkout seguro InfinitePay: escolha Pix ou cartão na próxima tela.", "valor": total, "disponivel": True},
-                {"metodo": "recorrente", "titulo": "Cartão recorrente", "descricao": "Depende de assinatura/tokenização oficial do gateway.", "valor": total, "disponivel": False},
             ],
         }
     finally:
@@ -2801,6 +2850,57 @@ def avisos_nao_lidos(aluno_id: int):
     except Exception:
         db.rollback()
         return {"nao_lidos": 0}
+    finally:
+        db.close()
+
+@app.get("/aluno/{aluno_id}/avisos")
+@app.get("/alunos/{aluno_id}/avisos")
+def listar_avisos_aluno(aluno_id: int):
+    db = SessionLocal()
+    try:
+        avisos = db.query(AvisoDB).order_by(AvisoDB.data.desc()).all()
+        leituras = db.query(AvisoLeituraDB).filter(
+            AvisoLeituraDB.aluno_id == aluno_id,
+            AvisoLeituraDB.lido == True,
+        ).all()
+        lidos_ids = {int(l.aviso_id) for l in leituras if l.aviso_id is not None}
+        lista = []
+        for a in avisos:
+            lista.append({
+                "id": a.id,
+                "titulo": a.titulo,
+                "mensagem": a.mensagem,
+                "imagem_base64": a.imagem_base64,
+                "data": a.data.isoformat() if a.data else None,
+                "lido": int(a.id) in lidos_ids,
+            })
+        return {"avisos": lista, "nao_lidos": max(len(lista) - len(lidos_ids), 0)}
+    except Exception as e:
+        db.rollback()
+        return JSONResponse(status_code=500, content={"ok": False, "error": f"Erro ao carregar avisos do aluno: {str(e)}"})
+    finally:
+        db.close()
+
+@app.post("/aluno/{aluno_id}/avisos/{aviso_id}/ler")
+@app.post("/alunos/{aluno_id}/avisos/{aviso_id}/ler")
+def marcar_aviso_lido_aluno(aluno_id: int, aviso_id: int):
+    db = SessionLocal()
+    try:
+        aviso = db.query(AvisoDB).filter(AvisoDB.id == aviso_id).first()
+        if not aviso:
+            raise HTTPException(status_code=404, detail="Aviso não encontrado")
+        item = db.query(AvisoLeituraDB).filter(
+            AvisoLeituraDB.aviso_id == aviso_id,
+            AvisoLeituraDB.aluno_id == aluno_id,
+        ).first()
+        if not item:
+            item = AvisoLeituraDB(aviso_id=aviso_id, aluno_id=aluno_id, lido=True)
+            db.add(item)
+        else:
+            item.lido = True
+            item.data = now_br()
+        db.commit()
+        return {"ok": True}
     finally:
         db.close()
 
@@ -3835,12 +3935,141 @@ def _nested_get(data, *keys):
     return atual
 
 
+def _first_text(*values) -> Optional[str]:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _extrair_contato_pagamento(payload: Optional[dict]) -> dict:
+    """Tenta aproveitar dados de contato que o gateway devolver no webhook.
+
+    O app não consegue ler campos digitados dentro da tela externa da InfinitePay.
+    Porém, se o webhook/retorno do gateway trouxer customer/payer, salvamos apenas
+    dados básicos e seguros no cadastro do aluno para preencher melhor as próximas cobranças.
+    """
+    payload = payload or {}
+    customer = (
+        payload.get("customer")
+        or payload.get("payer")
+        or payload.get("buyer")
+        or _nested_get(payload, "data", "customer")
+        or _nested_get(payload, "data", "payer")
+        or _nested_get(payload, "invoice", "customer")
+        or _nested_get(payload, "transaction", "customer")
+        or {}
+    )
+    if not isinstance(customer, dict):
+        customer = {}
+
+    phone_obj = customer.get("phone") if isinstance(customer.get("phone"), dict) else {}
+    phone_joined = None
+    if phone_obj:
+        area = str(phone_obj.get("area_code") or phone_obj.get("areaCode") or "").strip()
+        number = str(phone_obj.get("number") or "").strip()
+        phone_joined = f"{area}{number}" if area or number else None
+
+    return {
+        "email": _first_text(
+            customer.get("email"), payload.get("customer_email"), payload.get("email"),
+            _nested_get(payload, "data", "customer_email"), _nested_get(payload, "data", "email"),
+        ),
+        "telefone": _first_text(
+            customer.get("phone_number"), customer.get("phoneNumber"), customer.get("phone"), phone_joined,
+            payload.get("customer_phone"), payload.get("phone"), _nested_get(payload, "data", "phone"),
+        ),
+        "nome": _first_text(customer.get("name"), customer.get("full_name"), payload.get("customer_name")),
+    }
+
+
+def _extrair_endereco_pagamento(payload: Optional[dict]) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    address = (
+        payload.get("address")
+        or payload.get("shipping_address")
+        or payload.get("customer_address")
+        or _nested_get(payload, "data", "address")
+        or _nested_get(payload, "customer", "address")
+        or _nested_get(payload, "data", "customer", "address")
+        or _nested_get(payload, "transaction", "address")
+        or {}
+    )
+    if not isinstance(address, dict):
+        return {}
+    return {
+        "logradouro": _first_text(address.get("street"), address.get("street_name"), address.get("logradouro"), address.get("address")),
+        "numero": _first_text(address.get("number"), address.get("street_number"), address.get("numero")),
+        "complemento": _first_text(address.get("complement"), address.get("complemento")),
+        "bairro": _first_text(address.get("neighborhood"), address.get("district"), address.get("bairro")),
+        "cidade": _first_text(address.get("city"), address.get("cidade")),
+        "estado": _first_text(address.get("state"), address.get("uf"), address.get("estado")),
+        "cep": _first_text(address.get("zip_code"), address.get("zipcode"), address.get("postal_code"), address.get("cep")),
+    }
+
+
+def salvar_contato_pagamento_se_retornado(db, aluno: AlunoDB, payload: Optional[dict]) -> None:
+    dados = _extrair_contato_pagamento(payload)
+    endereco = _extrair_endereco_pagamento(payload)
+    alteracoes = []
+
+    email = (dados.get("email") or "").strip().lower()
+    if email and "@" in email and "." in email.split("@")[-1]:
+        atual = (getattr(aluno, "email", None) or "").strip().lower()
+        if not atual:
+            aluno.email = email
+            alteracoes.append("email")
+
+    telefone_raw = dados.get("telefone") or ""
+    telefone_digits = only_digits(telefone_raw)
+    if telefone_digits.startswith("55") and len(telefone_digits) in (12, 13):
+        telefone_digits = telefone_digits[2:]
+    if len(telefone_digits) in (10, 11):
+        atual_phone = only_digits(getattr(aluno, "telefone", None) or "")
+        if not atual_phone:
+            aluno.telefone = telefone_digits
+            alteracoes.append("telefone")
+
+    mapa_endereco = {
+        "endereco_logradouro": (endereco.get("logradouro") or "").strip(),
+        "endereco_numero": (endereco.get("numero") or "").strip(),
+        "endereco_complemento": (endereco.get("complemento") or "").strip(),
+        "endereco_bairro": (endereco.get("bairro") or "").strip(),
+        "endereco_cidade": (endereco.get("cidade") or "").strip(),
+        "endereco_estado": (endereco.get("estado") or "").strip().upper(),
+        "endereco_cep": only_digits(endereco.get("cep") or ""),
+    }
+    for campo, valor in mapa_endereco.items():
+        if valor and not (getattr(aluno, campo, None) or "").strip():
+            setattr(aluno, campo, valor)
+            alteracoes.append(campo)
+
+    if alteracoes:
+        aluno.updated_at = now_br()
+        registrar_auditoria(
+            db,
+            "salvar_dados_pagamento",
+            "aluno",
+            aluno.id,
+            aluno.nome,
+            None,
+            ", ".join(alteracoes),
+            "Dados básicos retornados pelo gateway foram salvos para facilitar próximos pagamentos.",
+            ator_tipo="sistema",
+        )
+
+
 def _confirmar_pagamento_online(db, pagamento: PagamentoDB, payload: dict = None):
     aluno = buscar_aluno_por_id(db, pagamento.aluno_id)
     if not aluno:
         return {"ok": True, "mensagem": "Pagamento localizado, mas aluno não encontrado", "pagamento_id": pagamento.id}
     if str(pagamento.status or "").lower() in {"aprovado", "pago", "paid", "approved", "completed", "confirmado"}:
         return {"ok": True, "mensagem": "Pagamento já aprovado", "pagamento": pagamento_dict(pagamento), "aluno": aluno_dict(db, aluno)}
+    salvar_contato_pagamento_se_retornado(db, aluno, payload or {})
     pagamento.status = "aprovado"
     pagamento.status_gateway = "confirmado"
     pagamento.valor_pago = float(pagamento.valor or 0)
@@ -4226,8 +4455,12 @@ def relatorio_resumo_v82(data_inicio: Optional[str] = Query(default=None), data_
         financeiro_hoje = financeiro_periodo
         novos_cadastros = db.query(PreCadastroAlunoDB).filter(PreCadastroAlunoDB.status == "aguardando_aprovacao").count()
 
-        potencial_atrasados = sum(float(a.get("valor_final") or a.get("valor_plano") or 0) for a in atrasados)
+        valor_pendente = sum(float(a.get("total_a_pagar") or a.get("valor_final") or a.get("valor_plano") or 0) for a in pendentes)
+        valor_atrasado = sum(float(a.get("total_a_pagar") or a.get("valor_final") or a.get("valor_plano") or 0) for a in atrasados)
+        valor_inativo = sum(float(a.get("total_a_pagar") or a.get("valor_final") or a.get("valor_plano") or 0) for a in inativos)
+        potencial_atrasados = valor_atrasado
         faturamento_real = sum(float(a.get("valor_final") or a.get("valor_plano") or 0) for a in em_dia)
+        a_receber_total = valor_pendente + valor_atrasado
 
         return {
             "ok": True,
@@ -4248,6 +4481,12 @@ def relatorio_resumo_v82(data_inicio: Optional[str] = Query(default=None), data_
             "financeiro_periodo": financeiro_periodo,
             "novos_cadastros": int(novos_cadastros or 0),
             "faturamento_real": faturamento_real,
+            "a_receber": round(a_receber_total, 2),
+            "valor_pendente": round(valor_pendente, 2),
+            "pendentes_valor": round(valor_pendente, 2),
+            "valor_atrasado": round(valor_atrasado, 2),
+            "atrasados_valor": round(valor_atrasado, 2),
+            "valor_inativo": round(valor_inativo, 2),
             "potencial_atrasados": potencial_atrasados,
             "inadimplencia_valor": potencial_atrasados,
             "status_alunos": {
